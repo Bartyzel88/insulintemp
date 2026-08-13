@@ -407,7 +407,28 @@ Jeżeli odczyt jest niestabilny o wiele dziesiątych stopnia mimo ustabilizowane
 
 TMP117 jest fabrycznie kalibrowanym czujnikiem i w tym projekcie nie ma dla niego ręcznego offsetu. Połóż oba czujniki obok siebie na co najmniej 30 minut i sprawdź, czy wskazania są rozsądnie zbliżone. Ze względu na różne obudowy i bezwładność termiczną kilka dziesiątych stopnia różnicy nie jest samo w sobie alarmem; duża i trwała rozbieżność wymaga sprawdzenia montażu.
 
-### 7.3 Test zasięgu
+### 7.3 Pomiar poboru prądu — rozstrzyga o czasie pracy
+
+**To jedyny pomiar, który naprawdę mówi, czy urządzenie wytrzyma miesiące, czy tygodnie.** Wszystkie oszczędności w firmware są nieistotne, jeśli jakiś element pobiera miliampery.
+
+Wepnij amperomierz szeregowo między baterię a płytkę, zamiast baterii. Poczekaj minutę, aż urządzenie wejdzie w rytm.
+
+| Odczyt | Wniosek |
+|---|---|
+| 15–35 µA | Prawidłowo. Ogniwo 470 mAh wystarczy na wiele miesięcy |
+| ~1–2 mA | Coś świeci stale. Najczęściej dioda zasilania na module TMP117 |
+| dziesiątki mA | Nie zadziałało uśpienie zewnętrznej pamięci QSPI albo jest zwarcie |
+
+**Jeśli wyszło 1–2 mA**, masz dwa wyjścia i żadne nie wymaga lutowania SMD:
+
+1. **Zasilaj moduł z pinu.** Przenieś przewód `VIN` modułu TMP117 z `3V3` na `D1`, a w pliku `insulin_temp.ino` zmień `TMP117_POWER_PIN` z `-1` na `1`. Moduł pracuje wtedy ćwierć sekundy raz na dwie minuty, czyli średnio poniżej 3 µA razem z diodą.
+2. **Kup moduł bez stałej diody** i wymień.
+
+Po zmianie zmierz ponownie i **sprawdź odczyty powietrza przez kilka godzin**, zanim uznasz sprawę za zamkniętą. Rezystory podciągające I2C na module są zasilane z jego napięcia, więc odcinanie zasilania to zmiana, która wymaga potwierdzenia w praktyce.
+
+> Zaklejenie diody taśmą niczego nie zmienia. Dioda pobiera prąd niezależnie od tego, czy widzisz jej światło.
+
+### 7.4 Test zasięgu
 
 Włóż urządzenie do lodówki, zamknij drzwi, stań tam, gdzie zwykle stoisz, spróbuj się połączyć.
 
@@ -467,18 +488,20 @@ Kolor mówi przede wszystkim **kierunek problemu**, a liczba mrugnięć jego **p
 
 | Sygnał | Znaczenie |
 |---|---|
-| zielony ×1 około raz/min | brak aktywnego ostrzeżenia |
-| żółty ×1 około raz/min | bateria poniżej 15% |
-| żółty ×2 około raz/min | TMP117 wskazuje, że warto sprawdzić ręcznie wybrany tryb |
+| zielony ×1 co ok. 20 s | brak aktywnego ostrzeżenia |
+| żółty ×1 co ok. 20 s | bateria poniżej 15% |
+| żółty ×2 co ok. minutę | TMP117 wskazuje, że warto sprawdzić ręcznie wybrany tryb |
 | niebieski ×1 co ok. 15 s | aktualnie za zimno dla wybranego trybu |
 | czerwony ×1 co ok. 15 s | aktualnie za ciepło dla wybranego trybu |
-| niebieski ×2 około raz/min | wcześniej wystąpiło przekroczenie dolnego progu |
-| czerwony ×2 około raz/min | wcześniej wystąpiło przekroczenie górnego progu |
-| niebieski ×3 co ok. 30 s | wykryto temperaturę poniżej `FREEZE_LIMIT` — ryzyko zamarznięcia |
-| czerwony ×3 co ok. 30 s | osiągnięto krytyczny próg cieplny ustawiony w firmware |
+| niebieski ×2 co ok. minutę | wcześniej wystąpiło przekroczenie dolnego progu |
+| czerwony ×2 co ok. minutę | wcześniej wystąpiło przekroczenie górnego progu |
+| niebieski ×3 **co 3 s przez pierwszą dobę**, potem co 30 s | wykryto temperaturę poniżej `FREEZE_LIMIT` — ryzyko zamarznięcia |
+| czerwony ×3 **co 3 s przez pierwszą dobę**, potem co 30 s | osiągnięto krytyczny próg cieplny ustawiony w firmware |
 | magenta ×3 co ok. 15 s | brak wiarygodnego odczytu sondy głównej **lub błąd pamięci trwałej** |
 
-Jeżeli przez kilka minut nie widzisz żadnego błysku, sprawdź aplikację lub podłącz USB. Brak LED może oznaczać rozładowanie, ale sam w sobie nie jest jednoznaczną diagnozą.
+**Dlaczego alarm krytyczny zwalnia po dobie.** Zatrzask może trwać tygodniami, a miganie co 3 s przez ten czas zjadłoby baterię przypominaniem o czymś, co już zauważyłeś. Przez pierwszą dobę sygnał jest natarczywy, potem oszczędny. Po restarcie lub wymianie baterii zatrzask dostaje ponownie godzinę szybkiego migania, żeby nie umknął.
+
+**Heartbeat co 20 sekund jest celowy.** Gdyby zielony błysk pojawiał się raz na minutę, cisza przez pół minuty byłaby normalna i zasada „brak błysku znaczy brak nadzoru” straciłaby sens. Przy 20 sekundach brak jakiegokolwiek sygnału **przez minutę** to już realny sygnał: sprawdź aplikację albo podłącz USB.
 
 ### 9.2 Aplikacja i wybór trybu
 
