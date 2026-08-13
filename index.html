@@ -283,6 +283,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
       <div class="temp" id="temp">--,--<small>°C</small></div>
       <div class="verdict" id="verdict">Czekam na odczyt</div>
       <div class="context" id="context">—</div>
+      <div class="context" id="air" style="margin-top:2px">—</div>
     </div>
   </section>
 
@@ -319,6 +320,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
     <button id="btnMeasure">Zmierz teraz</button>
     <button id="btnLog">Pobierz log</button>
     <button id="btnCsv" disabled>Zapisz CSV</button>
+    <button id="btnCalib">Kalibruj w lodzie</button>
     <button class="danger" id="btnReset">Zeruj pamięć</button>
   </div>
 
@@ -499,7 +501,10 @@ function parseLive(line) {
     minOutside: +f[12],
     sensorOk:   f[14] === "1",
     min:        parseFloat(f[17]),
-    max:        parseFloat(f[18])
+    max:        parseFloat(f[18]),
+    air:        parseFloat(f[19]),
+    airOk:      f[20] === "1",
+    offset:     parseFloat(f[21])
   };
 }
 
@@ -510,7 +515,7 @@ function parseLive(line) {
 function verdictOf(s) {
   if (!s.sensorOk)
     return { txt:"Brak wiarygodnego odczytu", tone:"amber",
-             sub:"czujnik nie odpowiada" };
+             sub:"sonda nie odpowiada, pamięć wstrzymana" };
 
   if (s.frozen)
     return { txt:"Nie używaj. Zamarzła.", tone:"cold",
@@ -551,6 +556,20 @@ function render() {
 
   const modeTxt = s.mode === 1 ? "w lodówce" : s.mode === 2 ? "poza lodówką" : "rozpoznaje";
   $("context").textContent = `${modeTxt} · ${v.sub}`;
+
+  // Powietrze samo w sobie nie alarmuje, ale różnica mówi, CO się dzieje:
+  // oba spadają razem -> lodówka; rośnie sama sonda -> insulina jest wyjęta.
+  if (s.airOk) {
+    const d = s.temp - s.air;
+    let hint = "";
+    if (s.mode === 1 && d > 3)       hint = " · insulina cieplejsza od lodówki";
+    else if (s.mode === 1 && s.air < 0) hint = " · powietrze poniżej zera";
+    else if (s.mode === 2 && d < -3) hint = " · insulina jeszcze zimna";
+    $("air").textContent =
+      `powietrze ${fmtTemp(s.air)} °C · różnica ${d > 0 ? "+" : ""}${fmtTemp(d)}${hint}`;
+  } else {
+    $("air").textContent = "powietrze — brak odczytu TMP117";
+  }
 
   // pasmo dopuszczalne zależy od trybu
   const out = s.mode === 2;
@@ -662,6 +681,24 @@ $("btnConnect").onclick = () => {
 $("btnMeasure").onclick = () => send("M");
 $("btnLog").onclick     = () => send("D");
 $("btnCsv").onclick     = saveCsv;
+
+$("btnCalib").onclick = () => {
+  if (!state) return;
+  if (!state.sensorOk) { alert("Sonda nie odpowiada. Sprawdź połączenie."); return; }
+
+  const surowy = state.temp - state.offset;
+  if (surowy < -3 || surowy > 3) {
+    alert(`Sonda pokazuje ${fmtTemp(state.temp)} °C, czyli nie jest w lodzie.\n\n` +
+          "Napełnij kubek rozdrobnionym lodem, dolej odrobinę wody, wymieszaj. " +
+          "Zanurz sondę na 10 minut, dopiero potem kalibruj.");
+    return;
+  }
+  if (confirm(`Przyjmuję, że sonda jest teraz dokładnie w 0,00 °C.\n\n` +
+              `Odczyt surowy: ${fmtTemp(surowy)} °C\n` +
+              `Nowy offset: ${surowy > 0 ? "-" : "+"}${fmtTemp(Math.abs(surowy))} °C`)) {
+    send("C0");
+  }
+};
 
 $("btnReset").onclick = () => {
   if (confirm("Zerujesz pamięć przekroczeń i liczniki. Historia zdarzeń w logu " +
