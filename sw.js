@@ -14,7 +14,7 @@
  * zasoby zostana w cache.
  */
 
-const VERSION = "insutemp-v2";
+const VERSION = "insutemp-v3";
 
 const SHELL = [
   "./",
