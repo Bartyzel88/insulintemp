@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0B1118">
 <meta name="description" content="Odczyt czujnika temperatury insuliny przez Bluetooth.">
-<link rel="manifest" href="./manifest.webmanifest">
+<link rel="manifest" href="./manifest.json">
 <link rel="icon" href="./favicon-32.png" sizes="32x32">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -261,6 +261,9 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
     <p id="installHint" class="hidden">Naciśnij <strong>Zainstaluj</strong> w górnej
       listwie, żeby dodać ikonę na ekran główny. Aplikacja będzie się otwierać bez
       paska przeglądarki i zadziała też bez internetu.</p>
+    <p id="diag" style="font-family:var(--mono);font-size:11px;letter-spacing:.02em;
+      margin-top:16px;padding-top:14px;border-top:1px solid var(--edge)">
+      sprawdzam…</p>
   </div>
 </div>
 
@@ -706,6 +709,47 @@ window.addEventListener("appinstalled", () => {
   installPrompt = null;
   $("btnInstall").classList.add("hidden");
 });
+
+/* ---------- diagnostyka instalacji ---------- */
+
+/*
+ * Skrót-zakładka i zainstalowana aplikacja wyglądają na ekranie głównym
+ * identycznie, więc bez tych trzech odczytów diagnoza to zgadywanie.
+ */
+async function diagnose() {
+  const standalone = window.matchMedia("(display-mode: standalone)").matches
+                     || window.navigator.standalone === true;
+
+  let sw = "nieobsługiwany";
+  if ("serviceWorker" in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      sw = !reg ? "nie zarejestrowany"
+         : reg.active ? "aktywny" : "instaluje się, odśwież";
+    } catch (e) { sw = "błąd"; }
+  }
+
+  let man = "niedostępny";
+  try {
+    const r = await fetch("./manifest.json", { cache:"no-store" });
+    man = r.ok ? "OK" : "HTTP " + r.status;
+  } catch (e) { /* offline albo zła ścieżka */ }
+
+  const ble = navigator.bluetooth ? "dostępny" : "BRAK";
+
+  const line = (k, v, bad) =>
+    `<span class="mute">${k}</span> <span class="${bad ? "hot" : "safe"}">${v}</span>`;
+
+  $("diag").innerHTML = [
+    line("tryb:", standalone ? "aplikacja" : "przeglądarka", !standalone),
+    line("service worker:", sw, sw !== "aktywny"),
+    line("manifest:", man, man !== "OK"),
+    line("bluetooth:", ble, ble !== "dostępny")
+  ].join("<br>");
+}
+
+diagnose();
+setTimeout(diagnose, 2500);   // service worker aktywuje się z opóźnieniem
 </script>
 </body>
 </html>

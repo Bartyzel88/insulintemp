@@ -14,12 +14,12 @@
  * zasoby zostana w cache.
  */
 
-const VERSION = "insutemp-v1";
+const VERSION = "insutemp-v2";
 
 const SHELL = [
   "./",
   "./index.html",
-  "./manifest.webmanifest",
+  "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
   "./icon-512-maskable.png",
