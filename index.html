@@ -414,7 +414,38 @@ async function connect() {
       optionalServices: [NUS_SERVICE]
     });
   } catch (e) {
-    return;                              // użytkownik zamknął okno wyboru
+    /*
+     * Ten sam wyjatek oznacza kilka roznych rzeczy i wczesniej wszystkie
+     * konczyly sie cichym powrotem. Rozdzielamy je, bo "nic sie nie stalo"
+     * to najgorsza mozliwa informacja przy problemie z uprawnieniami.
+     */
+    if (e.name === "NotFoundError") {
+      // anulowanie przez uzytkownika albo pusta lista - nie strasz go
+      if (!/cancel/i.test(e.message || "")) {
+        alert("Nie znaleziono urządzenia InsuTemp.\n\n" +
+              "Sprawdź kolejno:\n" +
+              "1. Czujnik jest zasilany i mruga.\n" +
+              "2. Nie jest zamknięty w lodówce — metal ekranuje Bluetooth.\n" +
+              "3. Bluetooth w telefonie jest włączony.\n" +
+              "4. Chrome ma uprawnienie „Urządzenia w pobliżu”. Uprawnień szukaj " +
+              "przy aplikacji Chrome, nie przy ikonie InsuTemp — zainstalowana " +
+              "aplikacja korzysta z uprawnień Chrome i własnych nie ma.");
+      }
+    } else if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+      alert("Przeglądarka odmówiła dostępu do Bluetooth.\n\n" +
+            "Najczęstsze przyczyny:\n" +
+            "• Chrome nie ma uprawnienia „Urządzenia w pobliżu” — sprawdź " +
+            "w Ustawienia → Aplikacje → Chrome → Uprawnienia.\n" +
+            "• Strona otwarta inaczej niż przez HTTPS.\n\n" +
+            "Szczegóły: " + e.name);
+    } else if (e.name === "InvalidStateError" || e.name === "NotSupportedError") {
+      alert("Bluetooth jest niedostępny w tym telefonie lub wyłączony.\n\n" +
+            "Szczegóły: " + e.name + " — " + (e.message || ""));
+    } else {
+      alert("Nie udało się otworzyć listy urządzeń.\n\n" +
+            e.name + ": " + (e.message || ""));
+    }
+    return;
   }
 
   $("btnConnect").disabled = true;
@@ -783,7 +814,10 @@ async function diagnose() {
     line("service worker:", sw, sw !== "aktywny"),
     line("manifest:", man, man !== "OK"),
     line("bluetooth:", ble, ble !== "dostępny")
-  ].join("<br>");
+  ].join("<br>") +
+  (standalone
+    ? '<br><span class="mute">uprawnienia trzyma Chrome, nie ta ikona</span>'
+    : "");
 }
 
 diagnose();
