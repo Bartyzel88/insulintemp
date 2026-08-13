@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B1118">
+<meta name="description" content="Odczyt czujnika temperatury insuliny przez Bluetooth.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="InsuTemp">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>InsuTemp</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --void:#0B1118;
+  --panel:#121D28;
+  --panel-2:#16232F;
+  --edge:#22323F;
+  --cold:#47A6F0;
+  --hot:#FF5B44;
+  --safe:#57D9A3;
+  --amber:#F0B429;
+  --ink:#DCE7F0;
+  --mute:#6B8299;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+html{-webkit-text-size-adjust:100%}
+
+body{
+  background:var(--void);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:15px;
+  line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left));
+  padding-right:max(16px,env(safe-area-inset-right));
+  padding-bottom:calc(40px + env(safe-area-inset-bottom));
+  max-width:560px;
+  margin:0 auto;
+  min-height:100vh;
+}
+
+/* ---------- górna listwa ---------- */
+
+.rail{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:calc(18px + env(safe-area-inset-top)) 0 16px;
+  border-bottom:1px solid var(--edge);
+  position:sticky;
+  top:0;
+  background:var(--void);
+  z-index:10;
+}
+
+.wordmark{
+  font-family:var(--mono);
+  font-weight:600;
+  font-size:13px;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+
+.dot{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--mute);
+  flex:none;
+  transition:background .3s;
+}
+.dot.on{background:var(--safe);box-shadow:0 0 0 3px rgba(87,217,163,.16)}
+
+.rail .spacer{flex:1}
+
+button{
+  font-family:var(--sans);
+  font-size:14px;
+  font-weight:500;
+  color:var(--ink);
+  background:var(--panel-2);
+  border:1px solid var(--edge);
+  border-radius:7px;
+  padding:9px 14px;
+  cursor:pointer;
+  transition:background .15s,border-color .15s;
+}
+button:hover:not(:disabled){background:#1D2C3A;border-color:#31465A}
+button:focus-visible{outline:2px solid var(--cold);outline-offset:2px}
+button:disabled{opacity:.35;cursor:not-allowed}
+
+button.primary{background:var(--cold);border-color:var(--cold);color:#06131F;font-weight:600}
+button.primary:hover:not(:disabled){background:#5FB4F5;border-color:#5FB4F5}
+button.danger{color:var(--hot);border-color:#3A2622}
+button.danger:hover:not(:disabled){background:#241614}
+
+/* ---------- przyrząd ---------- */
+
+.instrument{
+  display:grid;
+  grid-template-columns:64px 1fr;
+  gap:20px;
+  padding:26px 0 22px;
+  align-items:stretch;
+}
+
+.scale{
+  position:relative;
+  height:260px;
+  border-left:1px solid var(--edge);
+  margin-left:20px;
+}
+
+/* pasmo dopuszczalne */
+.band{
+  position:absolute;left:0;width:22px;
+  background:rgba(87,217,163,.13);
+  border-top:1px solid rgba(87,217,163,.4);
+  border-bottom:1px solid rgba(87,217,163,.4);
+  transition:top .5s cubic-bezier(.4,0,.2,1),height .5s cubic-bezier(.4,0,.2,1);
+}
+
+/* twarde granice: 0 i 37 */
+.hard{position:absolute;left:0;width:22px;height:0;border-top:1px dashed;opacity:.55}
+.hard.lo{border-color:var(--cold)}
+.hard.hi{border-color:var(--hot)}
+
+/* blizny po przekroczeniach */
+.scar{
+  position:absolute;left:0;width:22px;height:2px;
+  opacity:0;
+  transition:opacity .6s;
+}
+.scar.show{opacity:.85}
+
+.tick{position:absolute;left:26px;transform:translateY(-50%);
+  font-family:var(--mono);font-size:10px;color:var(--mute);white-space:nowrap}
+.tick::before{content:"";position:absolute;left:-26px;top:50%;width:6px;
+  border-top:1px solid var(--edge)}
+
+/* wskaźnik bieżącego odczytu */
+.needle{
+  position:absolute;left:-20px;width:42px;height:0;
+  border-top:2px solid var(--safe);
+  transition:top .7s cubic-bezier(.4,0,.2,1),border-color .4s;
+}
+.needle::after{
+  content:"";position:absolute;right:-5px;top:-4px;
+  width:0;height:0;
+  border:5px solid transparent;border-right-color:currentColor;
+}
+
+.readout{display:flex;flex-direction:column;justify-content:center;gap:14px}
+
+.temp{
+  font-family:var(--mono);
+  font-size:clamp(46px,15vw,64px);
+  font-weight:500;
+  line-height:.95;
+  letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;
+}
+.temp small{font-size:.36em;font-weight:400;color:var(--mute);margin-left:.15em;letter-spacing:0}
+
+.verdict{font-size:17px;font-weight:600;line-height:1.3}
+.context{font-family:var(--mono);font-size:11px;color:var(--mute);
+  letter-spacing:.1em;text-transform:uppercase}
+
+.cold{color:var(--cold)} .hot{color:var(--hot)}
+.safe{color:var(--safe)} .amber{color:var(--amber)} .mute{color:var(--mute)}
+
+/* ---------- kafelki zatrzasków ---------- */
+
+h2{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--mute);margin:26px 0 10px}
+
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+
+.tile{
+  background:var(--panel);
+  border:1px solid var(--edge);
+  border-radius:8px;
+  padding:12px 13px;
+  transition:border-color .4s,background .4s;
+}
+.tile .lbl{font-size:13px;font-weight:500}
+.tile .val{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--mute);margin-top:3px}
+.tile.lit-cold{border-color:rgba(71,166,240,.55);background:rgba(71,166,240,.09)}
+.tile.lit-cold .val{color:var(--cold)}
+.tile.lit-hot{border-color:rgba(255,91,68,.55);background:rgba(255,91,68,.09)}
+.tile.lit-hot .val{color:var(--hot)}
+
+/* ---------- mierniki ---------- */
+
+.meter{margin-top:12px}
+.meter .row{display:flex;justify-content:space-between;align-items:baseline;
+  font-size:13px;margin-bottom:6px}
+.meter .num{font-family:var(--mono);font-size:12px;color:var(--mute);
+  font-variant-numeric:tabular-nums}
+.bar{height:4px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.bar span{display:block;height:100%;width:0;border-radius:2px;
+  transition:width .6s cubic-bezier(.4,0,.2,1),background .4s}
+
+/* ---------- akcje i log ---------- */
+
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.actions button{flex:1 1 auto;min-width:132px}
+
+.log{margin-top:12px;border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+th{background:var(--panel-2);color:var(--mute);font-weight:500;text-align:left;
+  padding:8px 10px;letter-spacing:.08em;text-transform:uppercase;font-size:9px}
+td{padding:7px 10px;border-top:1px solid var(--edge);vertical-align:top}
+tbody tr:nth-child(odd){background:rgba(255,255,255,.012)}
+td.ev{white-space:nowrap;font-weight:500}
+td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
+
+.empty{padding:22px 14px;text-align:center;color:var(--mute);font-size:13px;
+  font-family:var(--sans)}
+
+.note{margin-top:22px;padding-top:16px;border-top:1px solid var(--edge);
+  font-size:12px;color:var(--mute);line-height:1.6}
+.note strong{color:var(--ink);font-weight:600}
+
+.hidden{display:none!important}
+
+@media(prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="rail">
+  <span class="dot" id="dot"></span>
+  <span class="wordmark">InsuTemp</span>
+  <span class="spacer"></span>
+  <button id="btnInstall" class="hidden">Zainstaluj</button>
+  <button class="primary" id="btnConnect">Połącz</button>
+</div>
+
+<div id="offline">
+  <div class="note" style="border-top:none;margin-top:36px;padding-top:0">
+    <p style="font-size:15px;color:var(--ink);line-height:1.55;margin-bottom:14px">
+      Włącz Bluetooth i naciśnij <strong>Połącz</strong>. Wybierz z listy urządzenie
+      <strong>InsuTemp</strong>. Czujnik mrugnie dwa razy na zielono, żeby potwierdzić,
+      że to ten, o który ci chodzi.</p>
+    <p>Działa w przeglądarce Chrome na Androidzie i na komputerze. Safari na iPhonie
+      nie obsługuje Bluetooth ze stron internetowych, tam potrzebna jest aplikacja
+      Bluefy albo WebBLE.</p>
+    <p id="installHint" class="hidden">Naciśnij <strong>Zainstaluj</strong> w górnej
+      listwie, żeby dodać ikonę na ekran główny. Aplikacja będzie się otwierać bez
+      paska przeglądarki i zadziała też bez internetu.</p>
+  </div>
+</div>
+
+<main id="panel" class="hidden">
+
+  <section class="instrument">
+    <div class="scale" id="scale">
+      <div class="band" id="band"></div>
+      <div class="hard lo" id="hardLo"></div>
+      <div class="hard hi" id="hardHi"></div>
+      <div class="scar" id="scarCold" style="background:var(--cold)"></div>
+      <div class="scar" id="scarWarm" style="background:var(--hot)"></div>
+      <div class="needle" id="needle"></div>
+    </div>
+
+    <div class="readout">
+      <div class="temp" id="temp">--,--<small>°C</small></div>
+      <div class="verdict" id="verdict">Czekam na odczyt</div>
+      <div class="context" id="context">—</div>
+    </div>
+  </section>
+
+  <h2>Pamięć przekroczeń</h2>
+  <div class="tiles">
+    <div class="tile" id="tFrozen">
+      <div class="lbl">Zamarzła</div><div class="val" id="vFrozen">nie</div>
+    </div>
+    <div class="tile" id="tCooked">
+      <div class="lbl">Przegrzana</div><div class="val" id="vCooked">nie</div>
+    </div>
+    <div class="tile" id="tCold">
+      <div class="lbl">Było za zimno</div><div class="val" id="vCold">nie</div>
+    </div>
+    <div class="tile" id="tWarm">
+      <div class="lbl">Było za ciepło</div><div class="val" id="vWarm">nie</div>
+    </div>
+  </div>
+
+  <h2>Liczniki</h2>
+  <div class="meter">
+    <div class="row"><span>Dawka cieplna</span><span class="num" id="nHeat">— / —</span></div>
+    <div class="bar"><span id="bHeat" style="background:var(--hot)"></span></div>
+  </div>
+  <div class="meter">
+    <div class="row"><span>Bateria</span><span class="num" id="nBatt">—</span></div>
+    <div class="bar"><span id="bBatt" style="background:var(--safe)"></span></div>
+  </div>
+  <div class="meter">
+    <div class="row"><span>Poza lodówką łącznie</span><span class="num" id="nOut">—</span></div>
+  </div>
+
+  <div class="actions">
+    <button id="btnMeasure">Zmierz teraz</button>
+    <button id="btnLog">Pobierz log</button>
+    <button id="btnCsv" disabled>Zapisz CSV</button>
+    <button class="danger" id="btnReset">Zeruj pamięć</button>
+  </div>
+
+  <h2>Zdarzenia</h2>
+  <div class="log" id="logBox">
+    <div class="empty" id="logEmpty">Naciśnij „Pobierz log”, żeby ściągnąć historię z czujnika.</div>
+    <table class="hidden" id="logTable">
+      <thead><tr><th>Kiedy</th><th>Zdarzenie</th><th style="text-align:right">°C</th><th>Szczegóły</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <p><strong>To urządzenie domowej roboty, nie wyrób medyczny.</strong> Progi w firmware
+    to nastawy, nie fakty kliniczne. Zapalona pamięć przekroczenia znaczy „przekroczono
+    ustawiony próg”, a nie „insulina nie działa”. Przy realnym przekroczeniu sprawdź
+    ulotkę preparatu albo zapytaj farmaceuty, bo tolerancje różnią się między insulinami,
+    a kilka minut przy 9 °C to nie to samo co dwie godziny przy 35 °C.</p>
+  </div>
+
+</main>
+
+<script>
+"use strict";
+
+/* ---------- stałe protokołu ---------- */
+
+const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // zapis do czujnika
+const NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // powiadomienia
+
+const SCALE_MIN = -5, SCALE_MAX = 40;
+const TICKS = [0, 2, 8, 25, 30, 37];
+
+const $ = id => document.getElementById(id);
+
+let device = null, rxChar = null;
+let rxBuffer = "";
+let collecting = false, logLines = [], state = null;
+
+/* ---------- pomocnicze ---------- */
+
+// Pozycja w pionie: 0 % to góra skali, więc odwracamy oś.
+const posPct = c => (1 - (Math.min(Math.max(c, SCALE_MIN), SCALE_MAX) - SCALE_MIN)
+                        / (SCALE_MAX - SCALE_MIN)) * 100;
+
+const fmtTemp = c => c.toFixed(2).replace(".", ",");
+
+function fmtMinutes(m) {
+  if (m < 60) return m + " min";
+  const h = Math.floor(m / 60), r = m % 60;
+  if (h < 48) return r ? `${h} h ${r} min` : `${h} h`;
+  return `${Math.floor(h / 24)} d ${h % 24} h`;
+}
+
+function fmtStamp(raw) {
+  if (raw.startsWith("u")) return "+" + fmtMinutes(Math.round(+raw.slice(1) / 60));
+  const n = +raw;
+  if (!n) return raw;
+  const d = new Date(n * 1000);
+  return d.toLocaleString("pl-PL", { day:"2-digit", month:"2-digit",
+                                     hour:"2-digit", minute:"2-digit" });
+}
+
+/* ---------- rysowanie skali ---------- */
+
+function drawTicks() {
+  const scale = $("scale");
+  TICKS.forEach(c => {
+    const el = document.createElement("div");
+    el.className = "tick";
+    el.style.top = posPct(c) + "%";
+    el.textContent = c + "°";
+    scale.appendChild(el);
+  });
+  $("hardLo").style.top = posPct(0) + "%";
+  $("hardHi").style.top = posPct(37) + "%";
+}
+
+/* ---------- łączność ---------- */
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert("Ta przeglądarka nie obsługuje Bluetooth. Użyj Chrome na Androidzie, " +
+          "a na iPhonie aplikacji Bluefy lub WebBLE.");
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "InsuTemp" }],
+      optionalServices: [NUS_SERVICE]
+    });
+  } catch (e) {
+    return;                              // użytkownik zamknął okno wyboru
+  }
+
+  $("btnConnect").disabled = true;
+  $("btnConnect").textContent = "Łączę…";
+
+  try {
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    rxChar        = await service.getCharacteristic(NUS_RX);
+    const txChar  = await service.getCharacteristic(NUS_TX);
+
+    await txChar.startNotifications();
+    txChar.addEventListener("characteristicvaluechanged", onNotify);
+
+    $("dot").classList.add("on");
+    $("btnConnect").textContent = "Rozłącz";
+    $("btnConnect").classList.remove("primary");
+    $("btnConnect").disabled = false;
+    $("offline").classList.add("hidden");
+    $("panel").classList.remove("hidden");
+
+    // Czujnik nie ma zegara. Ustaw go przy każdym połączeniu, potem zmierz.
+    await send("T" + Math.floor(Date.now() / 1000));
+    await send("M");
+  } catch (e) {
+    $("btnConnect").disabled = false;
+    $("btnConnect").textContent = "Połącz";
+    alert("Nie udało się połączyć: " + e.message +
+          "\n\nSpróbuj podejść bliżej albo wyjąć czujnik z lodówki.");
+  }
+}
+
+function onDisconnected() {
+  rxChar = null;
+  $("dot").classList.remove("on");
+  $("btnConnect").textContent = "Połącz";
+  $("btnConnect").classList.add("primary");
+  $("btnConnect").disabled = false;
+  $("context").textContent = "połączenie przerwane";
+}
+
+async function send(cmd) {
+  if (!rxChar) return;
+  const data = new TextEncoder().encode(cmd + "\n");
+  for (let i = 0; i < data.length; i += 20) {          // MTU bywa mały
+    await rxChar.writeValue(data.slice(i, i + 20));
+  }
+}
+
+/* ---------- odbiór ---------- */
+
+function onNotify(ev) {
+  rxBuffer += new TextDecoder().decode(ev.target.value);
+  let nl;
+  while ((nl = rxBuffer.indexOf("\n")) >= 0) {
+    handleLine(rxBuffer.slice(0, nl).trim());
+    rxBuffer = rxBuffer.slice(nl + 1);
+  }
+}
+
+function handleLine(line) {
+  if (!line) return;
+
+  if (line.startsWith("#L,")) { state = parseLive(line); render(); return; }
+  if (line === "#B") { collecting = true; logLines = []; return; }
+  if (line === "#E") { collecting = false; renderLog(); return; }
+  if (collecting)    { logLines.push(line); }
+}
+
+function parseLive(line) {
+  const f = line.slice(3).split(",");
+  return {
+    temp:       parseFloat(f[0]),
+    mode:       +f[1],              // 0 nieznany, 1 lodówka, 2 transport
+    frozen:     f[3] === "1",
+    cooked:     f[4] === "1",
+    latchCold:  f[5] === "1",
+    latchWarm:  f[6] === "1",
+    batt:       +f[7],
+    vbat:       parseFloat(f[8]),
+    minAbove:   +f[10],
+    heatLimit:  +f[11],
+    minOutside: +f[12],
+    sensorOk:   f[14] === "1",
+    min:        parseFloat(f[17]),
+    max:        parseFloat(f[18])
+  };
+}
+
+/* ---------- werdykt ---------- */
+
+// Kolejność odpowiada priorytetom w firmware, żeby ekran i dioda nigdy
+// nie mówiły dwóch różnych rzeczy.
+function verdictOf(s) {
+  if (!s.sensorOk)
+    return { txt:"Brak wiarygodnego odczytu", tone:"amber",
+             sub:"czujnik nie odpowiada" };
+
+  if (s.frozen)
+    return { txt:"Nie używaj. Zamarzła.", tone:"cold",
+             sub:"uszkodzenie nieodwracalne" };
+
+  if (s.cooked)
+    return { txt:"Nie używaj bez konsultacji.", tone:"hot",
+             sub:"przekroczono próg przegrzania" };
+
+  const out = s.mode === 2;
+  const lo  = out ? -Infinity : 2, hi = out ? 30 : 8;
+
+  if (s.temp < lo) return { txt:"Za zimno w tej chwili", tone:"cold",
+                            sub:"poniżej progu przechowywania" };
+  if (s.temp > hi) return { txt:"Za ciepło w tej chwili", tone:"hot",
+                            sub:"powyżej progu przechowywania" };
+
+  if (s.latchCold || s.latchWarm)
+    return { txt:"Sprawdź log przed użyciem", tone: s.latchWarm ? "hot" : "cold",
+             sub:"progi były przekroczone" };
+
+  return { txt:"Nadaje się do użycia", tone:"safe", sub:"w zakresie" };
+}
+
+/* ---------- rysowanie ---------- */
+
+function render() {
+  const s = state;
+  if (!s) return;
+
+  const v = verdictOf(s);
+
+  $("temp").innerHTML = (s.sensorOk ? fmtTemp(s.temp) : "--,--") + "<small>°C</small>";
+  $("temp").className = "temp " + v.tone;
+
+  $("verdict").textContent = v.txt;
+  $("verdict").className   = "verdict " + v.tone;
+
+  const modeTxt = s.mode === 1 ? "w lodówce" : s.mode === 2 ? "poza lodówką" : "rozpoznaje";
+  $("context").textContent = `${modeTxt} · ${v.sub}`;
+
+  // pasmo dopuszczalne zależy od trybu
+  const out = s.mode === 2;
+  const top = posPct(out ? 30 : 8), bot = posPct(out ? 0 : 2);
+  $("band").style.top    = top + "%";
+  $("band").style.height = (bot - top) + "%";
+
+  // wskaźnik
+  const needle = $("needle");
+  needle.style.top = posPct(s.temp) + "%";
+  const col = v.tone === "cold" ? "var(--cold)" : v.tone === "hot" ? "var(--hot)"
+            : v.tone === "amber" ? "var(--amber)" : "var(--safe)";
+  needle.style.borderTopColor = col;
+  needle.style.color = col;
+
+  // blizny: min i max sesji, jeśli wyszły poza pasmo
+  setScar($("scarCold"), s.latchCold || s.frozen, s.min);
+  setScar($("scarWarm"), s.latchWarm || s.cooked, s.max);
+
+  tile("tFrozen","vFrozen", s.frozen, "cold", "TAK", "nie");
+  tile("tCooked","vCooked", s.cooked, "hot",  "TAK", "nie");
+  tile("tCold","vCold",     s.latchCold, "cold", "tak", "nie");
+  tile("tWarm","vWarm",     s.latchWarm, "hot",  "tak", "nie");
+
+  $("nHeat").textContent = `${s.minAbove} / ${s.heatLimit} min`;
+  $("bHeat").style.width = Math.min(100, s.minAbove / s.heatLimit * 100) + "%";
+
+  $("nBatt").textContent = `${s.batt} % · ${s.vbat.toFixed(2).replace(".",",")} V`;
+  $("bBatt").style.width = s.batt + "%";
+  $("bBatt").style.background = s.batt < 15 ? "var(--amber)" : "var(--safe)";
+
+  $("nOut").textContent = fmtMinutes(s.minOutside);
+}
+
+function setScar(el, show, temp) {
+  if (show && isFinite(temp)) {
+    el.style.top = posPct(temp) + "%";
+    el.classList.add("show");
+  } else {
+    el.classList.remove("show");
+  }
+}
+
+function tile(tileId, valId, lit, tone, onTxt, offTxt) {
+  const t = $(tileId);
+  t.classList.toggle("lit-cold", lit && tone === "cold");
+  t.classList.toggle("lit-hot",  lit && tone === "hot");
+  $(valId).textContent = lit ? onTxt : offTxt;
+}
+
+/* ---------- log ---------- */
+
+function renderLog() {
+  const rows = logLines
+    .filter(l => l && l.includes(","))
+    .map(l => {
+      const p = l.split(",");
+      return { ts:p[0], ev:p[1], t:p[2], d:p.slice(3).join(",") };
+    })
+    .reverse();                                   // najnowsze na górze
+
+  const body = $("logBody");
+  body.innerHTML = "";
+
+  if (!rows.length) {
+    $("logTable").classList.add("hidden");
+    $("logEmpty").classList.remove("hidden");
+    $("logEmpty").textContent = "Czujnik nie zapisał jeszcze żadnych zdarzeń. To dobra wiadomość.";
+    $("btnCsv").disabled = true;
+    return;
+  }
+
+  const tone = { FROZEN:"cold", OVERHEAT:"hot", EXC_START:"amber",
+                 EXC_END:"mute", SENSOR_FAIL:"amber", BATT_LOW:"amber" };
+
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    const t  = parseFloat(r.t);
+    tr.innerHTML =
+      `<td>${fmtStamp(r.ts)}</td>` +
+      `<td class="ev ${tone[r.ev] || ""}">${r.ev}</td>` +
+      `<td class="t">${isFinite(t) ? fmtTemp(t) : ""}</td>` +
+      `<td class="mute">${r.d || ""}</td>`;
+    body.appendChild(tr);
+  });
+
+  $("logEmpty").classList.add("hidden");
+  $("logTable").classList.remove("hidden");
+  $("btnCsv").disabled = false;
+}
+
+function saveCsv() {
+  const csv = "timestamp,zdarzenie,tempC,szczegoly\n" + logLines.join("\n") + "\n";
+  const url = URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "insutemp-" + new Date().toISOString().slice(0,10) + ".csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- zdarzenia ---------- */
+
+$("btnConnect").onclick = () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  else connect();
+};
+
+$("btnMeasure").onclick = () => send("M");
+$("btnLog").onclick     = () => send("D");
+$("btnCsv").onclick     = saveCsv;
+
+$("btnReset").onclick = () => {
+  if (confirm("Zerujesz pamięć przekroczeń i liczniki. Historia zdarzeń w logu " +
+              "zostaje. Rób to dopiero po wymianie insuliny na nową.")) {
+    send("R");
+  }
+};
+
+drawTicks();
+
+/* ---------- instalacja i praca offline ---------- */
+
+// Rejestrujemy dopiero po wczytaniu strony, zeby nie konkurowac
+// o pasmo z fontami i pierwszym renderem.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {
+      // Brak service workera to nie awaria - aplikacja dziala,
+      // traci tylko dostepnosc offline.
+    });
+  });
+}
+
+// Chrome pokazuje wlasna zachete do instalacji, ale bywa dyskretna.
+// Przechwytujemy zdarzenie i dajemy wlasny przycisk w listwie.
+let installPrompt = null;
+
+window.addEventListener("beforeinstallprompt", ev => {
+  ev.preventDefault();
+  installPrompt = ev;
+  $("btnInstall").classList.remove("hidden");
+  $("installHint").classList.remove("hidden");
+});
+
+$("btnInstall").onclick = async () => {
+  if (!installPrompt) return;
+  $("btnInstall").disabled = true;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  $("btnInstall").classList.add("hidden");
+};
+
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  $("btnInstall").classList.add("hidden");
+});
+</script>
+</body>
+</html>
