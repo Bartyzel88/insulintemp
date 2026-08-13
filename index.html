@@ -13,9 +13,6 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <title>InsuTemp</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
   --void:#0B1118;
@@ -28,8 +25,8 @@
   --amber:#F0B429;
   --ink:#DCE7F0;
   --mute:#6B8299;
-  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
-  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
@@ -211,7 +208,18 @@ h2{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.16em;
 .bar span{display:block;height:100%;width:0;border-radius:2px;
   transition:width .6s cubic-bezier(.4,0,.2,1),background .4s}
 
-/* ---------- akcje i log ---------- */
+/* ---------- tryb, akcje i log ---------- */
+
+.modebox{margin:18px 0 4px;padding:13px;background:var(--panel);border:1px solid var(--edge);border-radius:8px}
+.modebox .row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.modebox .lbl{font-size:13px;font-weight:600}
+.modebuttons{display:flex;gap:6px}
+.modebuttons button{padding:7px 10px;font-size:12px}
+.modebuttons button.selected{border-color:var(--safe);color:var(--safe);background:rgba(87,217,163,.08)}
+.modebox .hint{font-size:11px;color:var(--mute);margin-top:9px;line-height:1.45}
+.modebox.mismatch{border-color:rgba(240,180,41,.7)}
+.modebox.mismatch .hint{color:var(--amber)}
+.stale .temp,.stale .scale{opacity:.45}
 
 .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
 .actions button{flex:1 1 auto;min-width:132px}
@@ -255,9 +263,9 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
       Włącz Bluetooth i naciśnij <strong>Połącz</strong>. Wybierz z listy urządzenie
       <strong>InsuTemp</strong>. Czujnik mrugnie dwa razy na zielono, żeby potwierdzić,
       że to ten, o który ci chodzi.</p>
-    <p>Działa w przeglądarce Chrome na Androidzie i na komputerze. Safari na iPhonie
-      nie obsługuje Bluetooth ze stron internetowych, tam potrzebna jest aplikacja
-      Bluefy albo WebBLE.</p>
+    <p>Docelowo używaj Chrome/Chromium na Androidzie. Web Bluetooth wymaga zgodnej
+      przeglądarki; jeśli przycisk „Połącz” zgłasza brak Bluetooth, ta przeglądarka
+      nie udostępnia aplikacji potrzebnego interfejsu.</p>
     <p id="installHint" class="hidden">Naciśnij <strong>Zainstaluj</strong> w górnej
       listwie, żeby dodać ikonę na ekran główny. Aplikacja będzie się otwierać bez
       paska przeglądarki i zadziała też bez internetu.</p>
@@ -268,6 +276,17 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
 </div>
 
 <main id="panel" class="hidden">
+
+  <div class="modebox" id="modeBox">
+    <div class="row">
+      <span class="lbl">Wybrany tryb</span>
+      <div class="modebuttons">
+        <button id="btnFridge">Lodówka</button>
+        <button id="btnOut">Poza lodówką</button>
+      </div>
+    </div>
+    <div class="hint" id="modeHint">Tryb jest ustawiany ręcznie. Czujnik powietrza tylko ostrzega o możliwej pomyłce.</div>
+  </div>
 
   <section class="instrument">
     <div class="scale" id="scale">
@@ -290,10 +309,10 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
   <h2>Pamięć przekroczeń</h2>
   <div class="tiles">
     <div class="tile" id="tFrozen">
-      <div class="lbl">Zamarzła</div><div class="val" id="vFrozen">nie</div>
+      <div class="lbl">Ryzyko zamarznięcia</div><div class="val" id="vFrozen">nie</div>
     </div>
     <div class="tile" id="tCooked">
-      <div class="lbl">Przegrzana</div><div class="val" id="vCooked">nie</div>
+      <div class="lbl">Krytyczne ciepło</div><div class="val" id="vCooked">nie</div>
     </div>
     <div class="tile" id="tCold">
       <div class="lbl">Było za zimno</div><div class="val" id="vCold">nie</div>
@@ -305,7 +324,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
 
   <h2>Liczniki</h2>
   <div class="meter">
-    <div class="row"><span>Dawka cieplna</span><span class="num" id="nHeat">— / —</span></div>
+    <div class="row"><span id="heatLabel">Czas powyżej progu ciepła</span><span class="num" id="nHeat">— / —</span></div>
     <div class="bar"><span id="bHeat" style="background:var(--hot)"></span></div>
   </div>
   <div class="meter">
@@ -313,7 +332,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
     <div class="bar"><span id="bBatt" style="background:var(--safe)"></span></div>
   </div>
   <div class="meter">
-    <div class="row"><span>Poza lodówką łącznie</span><span class="num" id="nOut">—</span></div>
+    <div class="row"><span>Czas w trybie „poza lodówką”</span><span class="num" id="nOut">—</span></div>
   </div>
 
   <div class="actions">
@@ -353,13 +372,13 @@ const NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // zapis do czujnika
 const NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // powiadomienia
 
 const SCALE_MIN = -5, SCALE_MAX = 40;
-const TICKS = [0, 2, 8, 25, 30, 37];
 
 const $ = id => document.getElementById(id);
 
 let device = null, rxChar = null;
 let rxBuffer = "";
 let collecting = false, logLines = [], state = null;
+let lastLiveAt = 0;
 
 /* ---------- pomocnicze ---------- */
 
@@ -387,25 +406,27 @@ function fmtStamp(raw) {
 
 /* ---------- rysowanie skali ---------- */
 
-function drawTicks() {
+function drawTicks(values) {
   const scale = $("scale");
-  TICKS.forEach(c => {
-    const el = document.createElement("div");
-    el.className = "tick";
-    el.style.top = posPct(c) + "%";
-    el.textContent = c + "°";
-    scale.appendChild(el);
-  });
-  $("hardLo").style.top = posPct(0) + "%";
-  $("hardHi").style.top = posPct(37) + "%";
+  scale.querySelectorAll(".tick").forEach(el => el.remove());
+  [...new Set(values.map(v => Number(v).toFixed(2)))]
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((a,b) => a-b)
+    .forEach(c => {
+      const el = document.createElement("div");
+      el.className = "tick";
+      el.style.top = posPct(c) + "%";
+      el.textContent = (Number.isInteger(c) ? c : c.toFixed(1)) + "°";
+      scale.appendChild(el);
+    });
 }
 
 /* ---------- łączność ---------- */
 
 async function connect() {
   if (!navigator.bluetooth) {
-    alert("Ta przeglądarka nie obsługuje Bluetooth. Użyj Chrome na Androidzie, " +
-          "a na iPhonie aplikacji Bluefy lub WebBLE.");
+    alert("Ta przeglądarka nie udostępnia Web Bluetooth. Użyj zgodnej wersji Chrome/Chromium na Androidzie.");
     return;
   }
   try {
@@ -414,38 +435,7 @@ async function connect() {
       optionalServices: [NUS_SERVICE]
     });
   } catch (e) {
-    /*
-     * Ten sam wyjatek oznacza kilka roznych rzeczy i wczesniej wszystkie
-     * konczyly sie cichym powrotem. Rozdzielamy je, bo "nic sie nie stalo"
-     * to najgorsza mozliwa informacja przy problemie z uprawnieniami.
-     */
-    if (e.name === "NotFoundError") {
-      // anulowanie przez uzytkownika albo pusta lista - nie strasz go
-      if (!/cancel/i.test(e.message || "")) {
-        alert("Nie znaleziono urządzenia InsuTemp.\n\n" +
-              "Sprawdź kolejno:\n" +
-              "1. Czujnik jest zasilany i mruga.\n" +
-              "2. Nie jest zamknięty w lodówce — metal ekranuje Bluetooth.\n" +
-              "3. Bluetooth w telefonie jest włączony.\n" +
-              "4. Chrome ma uprawnienie „Urządzenia w pobliżu”. Uprawnień szukaj " +
-              "przy aplikacji Chrome, nie przy ikonie InsuTemp — zainstalowana " +
-              "aplikacja korzysta z uprawnień Chrome i własnych nie ma.");
-      }
-    } else if (e.name === "NotAllowedError" || e.name === "SecurityError") {
-      alert("Przeglądarka odmówiła dostępu do Bluetooth.\n\n" +
-            "Najczęstsze przyczyny:\n" +
-            "• Chrome nie ma uprawnienia „Urządzenia w pobliżu” — sprawdź " +
-            "w Ustawienia → Aplikacje → Chrome → Uprawnienia.\n" +
-            "• Strona otwarta inaczej niż przez HTTPS.\n\n" +
-            "Szczegóły: " + e.name);
-    } else if (e.name === "InvalidStateError" || e.name === "NotSupportedError") {
-      alert("Bluetooth jest niedostępny w tym telefonie lub wyłączony.\n\n" +
-            "Szczegóły: " + e.name + " — " + (e.message || ""));
-    } else {
-      alert("Nie udało się otworzyć listy urządzeń.\n\n" +
-            e.name + ": " + (e.message || ""));
-    }
-    return;
+    return;                              // użytkownik zamknął okno wyboru
   }
 
   $("btnConnect").disabled = true;
@@ -468,7 +458,7 @@ async function connect() {
     $("offline").classList.add("hidden");
     $("panel").classList.remove("hidden");
 
-    // Czujnik nie ma zegara. Ustaw go przy każdym połączeniu, potem zmierz.
+    // Czujnik nie ma RTC. Ustaw czas logu przy każdym połączeniu, potem odśwież wszystkie kanały.
     await send("T" + Math.floor(Date.now() / 1000));
     await send("M");
   } catch (e) {
@@ -485,7 +475,8 @@ function onDisconnected() {
   $("btnConnect").textContent = "Połącz";
   $("btnConnect").classList.add("primary");
   $("btnConnect").disabled = false;
-  $("context").textContent = "połączenie przerwane";
+  if (state) { state.stale = true; render(); }
+  else $("context").textContent = "połączenie przerwane";
 }
 
 async function send(cmd) {
@@ -510,7 +501,11 @@ function onNotify(ev) {
 function handleLine(line) {
   if (!line) return;
 
-  if (line.startsWith("#L,")) { state = parseLive(line); render(); return; }
+  if (line.startsWith("#L,")) {
+    const next = parseLive(line);
+    if (next) { state = next; state.stale = false; lastLiveAt = Date.now(); render(); }
+    return;
+  }
   if (line === "#B") { collecting = true; logLines = []; return; }
   if (line === "#E") { collecting = false; renderLog(); return; }
   if (collecting)    { logLines.push(line); }
@@ -518,15 +513,20 @@ function handleLine(line) {
 
 function parseLive(line) {
   const f = line.slice(3).split(",");
+  if (f.length < 28) return null;
+  const n = i => Number(f[i]);
+  if (![0,1,7,8,11,14].every(i => Number.isFinite(n(i)))) return null;
   return {
     temp:       parseFloat(f[0]),
-    mode:       +f[1],              // 0 nieznany, 1 lodówka, 2 transport
+    mode:       +f[1],
+    alarm:      f[2] === "1",
     frozen:     f[3] === "1",
     cooked:     f[4] === "1",
     latchCold:  f[5] === "1",
     latchWarm:  f[6] === "1",
     batt:       +f[7],
     vbat:       parseFloat(f[8]),
+    minOutRange:+f[9],
     minAbove:   +f[10],
     heatLimit:  +f[11],
     minOutside: +f[12],
@@ -535,7 +535,21 @@ function parseLive(line) {
     max:        parseFloat(f[18]),
     air:        parseFloat(f[19]),
     airOk:      f[20] === "1",
-    offset:     parseFloat(f[21])
+    offset:     parseFloat(f[21]),
+    coldScar:   parseFloat(f[22]),
+    warmScar:   parseFloat(f[23]),
+    modeMismatch: f[24] === "1",
+    secOutRange: +f[25],
+    secHeat:     +f[26],
+    secOutside:  +f[27],
+    freezeLimit: Number.isFinite(+f[28]) ? +f[28] : 0,
+    fridgeMin:   Number.isFinite(+f[29]) ? +f[29] : 2,
+    fridgeMax:   Number.isFinite(+f[30]) ? +f[30] : 8,
+    outWarn:     Number.isFinite(+f[31]) ? +f[31] : 25,
+    outMax:      Number.isFinite(+f[32]) ? +f[32] : 30,
+    cookLimit:   Number.isFinite(+f[33]) ? +f[33] : 37,
+    stateError:  f.length > 34 ? f[34] === "1" : false,
+    stale: false
   };
 }
 
@@ -544,31 +558,46 @@ function parseLive(line) {
 // Kolejność odpowiada priorytetom w firmware, żeby ekran i dioda nigdy
 // nie mówiły dwóch różnych rzeczy.
 function verdictOf(s) {
+  if (s.stale)
+    return { txt:"Dane nieaktualne", tone:"amber",
+             sub:"brak połączenia — ostatni odczyt nie jest aktualizowany" };
+
   if (!s.sensorOk)
     return { txt:"Brak wiarygodnego odczytu", tone:"amber",
-             sub:"sonda nie odpowiada, pamięć wstrzymana" };
+             sub:"sonda główna nie odpowiada" };
+
+  if (s.stateError)
+    return { txt:"Błąd pamięci trwałej", tone:"amber",
+             sub:"historia alarmów może nie przetrwać utraty zasilania — sprawdź urządzenie" };
 
   if (s.frozen)
-    return { txt:"Nie używaj. Zamarzła.", tone:"cold",
-             sub:"uszkodzenie nieodwracalne" };
+    return { txt:"Wykryto ryzyko zamarznięcia", tone:"cold",
+             sub:"sprawdź zalecenia producenta przed użyciem" };
 
   if (s.cooked)
-    return { txt:"Nie używaj bez konsultacji.", tone:"hot",
-             sub:"przekroczono próg przegrzania" };
+    return { txt:"Krytyczne przekroczenie ciepła", tone:"hot",
+             sub:"sprawdź ulotkę lub skonsultuj farmaceutę" };
 
   const out = s.mode === 2;
-  const lo  = out ? -Infinity : 2, hi = out ? 30 : 8;
+  const lo  = out ? -Infinity : s.fridgeMin, hi = out ? s.outMax : s.fridgeMax;
 
   if (s.temp < lo) return { txt:"Za zimno w tej chwili", tone:"cold",
-                            sub:"poniżej progu przechowywania" };
+                            sub:"poniżej ustawionego progu" };
   if (s.temp > hi) return { txt:"Za ciepło w tej chwili", tone:"hot",
-                            sub:"powyżej progu przechowywania" };
+                            sub:"powyżej ustawionego progu" };
+  if (out && s.temp > s.outWarn)
+    return { txt:"Ciepło — ostrzeżenie", tone:"amber",
+             sub:"powyżej progu ostrzegawczego, jeszcze poniżej progu alarmowego" };
+
+  if (s.modeMismatch)
+    return { txt:"Sprawdź wybrany tryb", tone:"amber",
+             sub:"temperatura powietrza nie pasuje do ustawienia" };
 
   if (s.latchCold || s.latchWarm)
-    return { txt:"Sprawdź log przed użyciem", tone: s.latchWarm ? "hot" : "cold",
-             sub:"progi były przekroczone" };
+    return { txt:"Sprawdź historię przekroczeń", tone: s.latchWarm ? "hot" : "cold",
+             sub:"wcześniej przekroczono ustawiony próg" };
 
-  return { txt:"Nadaje się do użycia", tone:"safe", sub:"w zakresie" };
+  return { txt:"W ustawionym zakresie", tone:"safe", sub:"brak wykrytego przekroczenia" };
 }
 
 /* ---------- rysowanie ---------- */
@@ -578,33 +607,43 @@ function render() {
   if (!s) return;
 
   const v = verdictOf(s);
+  $("panel").classList.toggle("stale", !!s.stale);
 
-  $("temp").innerHTML = (s.sensorOk ? fmtTemp(s.temp) : "--,--") + "<small>°C</small>";
+  $("temp").innerHTML = (s.sensorOk && !s.stale ? fmtTemp(s.temp) : "--,--") + "<small>°C</small>";
   $("temp").className = "temp " + v.tone;
 
   $("verdict").textContent = v.txt;
   $("verdict").className   = "verdict " + v.tone;
 
-  const modeTxt = s.mode === 1 ? "w lodówce" : s.mode === 2 ? "poza lodówką" : "rozpoznaje";
+  const modeTxt = s.mode === 1 ? "tryb: lodówka" : s.mode === 2 ? "tryb: poza lodówką" : "tryb: nieustawiony";
   $("context").textContent = `${modeTxt} · ${v.sub}`;
+  $("btnFridge").classList.toggle("selected", s.mode === 1);
+  $("btnOut").classList.toggle("selected", s.mode === 2);
+  $("modeBox").classList.toggle("mismatch", !!s.modeMismatch);
+  $("modeHint").textContent = s.modeMismatch
+    ? "Uwaga: temperatura powietrza wskazuje, że wybrany tryb może być niewłaściwy. Progi NIE zostały zmienione automatycznie."
+    : "Tryb jest ustawiany ręcznie. Czujnik powietrza tylko ostrzega o możliwej pomyłce.";
 
-  // Powietrze samo w sobie nie alarmuje, ale różnica mówi, CO się dzieje:
-  // oba spadają razem -> lodówka; rośnie sama sonda -> insulina jest wyjęta.
+  // Powietrze jest kanałem pomocniczym. Nie zmienia automatycznie progów.
   if (s.airOk) {
     const d = s.temp - s.air;
     let hint = "";
-    if (s.mode === 1 && d > 3)       hint = " · insulina cieplejsza od lodówki";
+    if (s.modeMismatch) hint = " · SPRAWDŹ TRYB";
+    else if (s.mode === 1 && d > 3) hint = " · sonda cieplejsza od powietrza";
     else if (s.mode === 1 && s.air < 0) hint = " · powietrze poniżej zera";
-    else if (s.mode === 2 && d < -3) hint = " · insulina jeszcze zimna";
+    else if (s.mode === 2 && d < -3) hint = " · sonda jeszcze zimna";
     $("air").textContent =
       `powietrze ${fmtTemp(s.air)} °C · różnica ${d > 0 ? "+" : ""}${fmtTemp(d)}${hint}`;
   } else {
     $("air").textContent = "powietrze — brak odczytu TMP117";
   }
 
-  // pasmo dopuszczalne zależy od trybu
+  // Skala i pasmo korzystają z progów faktycznie wysłanych przez firmware.
+  drawTicks([s.freezeLimit, s.fridgeMin, s.fridgeMax, s.outWarn, s.outMax, s.cookLimit]);
+  $("hardLo").style.top = posPct(s.freezeLimit) + "%";
+  $("hardHi").style.top = posPct(s.cookLimit) + "%";
   const out = s.mode === 2;
-  const top = posPct(out ? 30 : 8), bot = posPct(out ? 0 : 2);
+  const top = posPct(out ? s.outMax : s.fridgeMax), bot = posPct(out ? SCALE_MIN : s.fridgeMin);
   $("band").style.top    = top + "%";
   $("band").style.height = (bot - top) + "%";
 
@@ -616,23 +655,25 @@ function render() {
   needle.style.borderTopColor = col;
   needle.style.color = col;
 
-  // blizny: min i max sesji, jeśli wyszły poza pasmo
-  setScar($("scarCold"), s.latchCold || s.frozen, s.min);
-  setScar($("scarWarm"), s.latchWarm || s.cooked, s.max);
+  // Blizny po zdarzeniach są zapisywane trwale razem z zatrzaskami.
+  setScar($("scarCold"), s.latchCold || s.frozen, s.coldScar);
+  setScar($("scarWarm"), s.latchWarm || s.cooked, s.warmScar);
 
   tile("tFrozen","vFrozen", s.frozen, "cold", "TAK", "nie");
   tile("tCooked","vCooked", s.cooked, "hot",  "TAK", "nie");
   tile("tCold","vCold",     s.latchCold, "cold", "tak", "nie");
   tile("tWarm","vWarm",     s.latchWarm, "hot",  "tak", "nie");
 
-  $("nHeat").textContent = `${s.minAbove} / ${s.heatLimit} min`;
-  $("bHeat").style.width = Math.min(100, s.minAbove / s.heatLimit * 100) + "%";
+  const heatShown = s.secHeat < 60 ? `${s.secHeat} s` : fmtMinutes(Math.floor(s.secHeat / 60));
+  $("heatLabel").textContent = `Czas powyżej ${String(s.outMax).replace(".", ",")} °C`;
+  $("nHeat").textContent = `${heatShown} / ${s.heatLimit} min`;
+  $("bHeat").style.width = Math.min(100, s.secHeat / (s.heatLimit * 60) * 100) + "%";
 
   $("nBatt").textContent = `${s.batt} % · ${s.vbat.toFixed(2).replace(".",",")} V`;
   $("bBatt").style.width = s.batt + "%";
   $("bBatt").style.background = s.batt < 15 ? "var(--amber)" : "var(--safe)";
 
-  $("nOut").textContent = fmtMinutes(s.minOutside);
+  $("nOut").textContent = s.secOutside < 60 ? `${s.secOutside} s` : fmtMinutes(Math.floor(s.secOutside / 60));
 }
 
 function setScar(el, show, temp) {
@@ -673,18 +714,23 @@ function renderLog() {
     return;
   }
 
-  const tone = { FROZEN:"cold", OVERHEAT:"hot", EXC_START:"amber",
-                 EXC_END:"mute", PROBE_FAIL:"amber", AIR_FAIL:"amber",
-                 PROBE_OK:"mute", AIR_OK:"mute", BATT_LOW:"amber" };
+  const tone = { FREEZE_RISK:"cold", HEAT_CRITICAL:"hot", HEAT_DOSE:"hot",
+                 EXC_START:"amber", EXC_END:"mute", PROBE_FAIL:"amber", AIR_FAIL:"amber",
+                 PROBE_OK:"mute", AIR_OK:"mute", BATT_LOW:"amber", MODE_MISMATCH:"amber",
+                 MODE_MATCH:"mute", MODE_SET:"mute" };
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
     const t  = parseFloat(r.t);
-    tr.innerHTML =
-      `<td>${fmtStamp(r.ts)}</td>` +
-      `<td class="ev ${tone[r.ev] || ""}">${r.ev}</td>` +
-      `<td class="t">${isFinite(t) ? fmtTemp(t) : ""}</td>` +
-      `<td class="mute">${r.d || ""}</td>`;
+    const vals = [fmtStamp(r.ts), r.ev, isFinite(t) ? fmtTemp(t) : "", r.d || ""];
+    vals.forEach((value, i) => {
+      const td = document.createElement("td");
+      td.textContent = value;
+      if (i === 1) td.className = `ev ${tone[r.ev] || ""}`;
+      if (i === 2) td.className = "t";
+      if (i === 3) td.className = "mute";
+      tr.appendChild(td);
+    });
     body.appendChild(tr);
   });
 
@@ -710,6 +756,8 @@ $("btnConnect").onclick = () => {
   else connect();
 };
 
+$("btnFridge").onclick = () => send("F");
+$("btnOut").onclick    = () => send("O");
 $("btnMeasure").onclick = () => send("M");
 $("btnLog").onclick     = () => send("D");
 $("btnCsv").onclick     = saveCsv;
@@ -725,26 +773,34 @@ $("btnCalib").onclick = () => {
           "Zanurz sondę na 10 minut, dopiero potem kalibruj.");
     return;
   }
-  if (confirm(`Przyjmuję, że sonda jest teraz dokładnie w 0,00 °C.\n\n` +
+  if (confirm(`Przyjmuję, że sonda jest w prawidłowo przygotowanej kąpieli lodowo-wodnej, czyli blisko 0 °C.\n\n` +
               `Odczyt surowy: ${fmtTemp(surowy)} °C\n` +
-              `Nowy offset: ${surowy > 0 ? "-" : "+"}${fmtTemp(Math.abs(surowy))} °C`)) {
+              `Nowy offset: ${surowy > 0 ? "-" : "+"}${fmtTemp(Math.abs(surowy))} °C\n\n` +
+              `To koryguje offset; nie gwarantuje dokładności setnych stopnia.`)) {
     send("K");
   }
 };
 
 $("btnReset").onclick = () => {
-  if (confirm("Zerujesz pamięć przekroczeń i liczniki. Historia zdarzeń w logu " +
-              "zostaje. Rób to dopiero po wymianie insuliny na nową.")) {
+  if (confirm("Zerujesz trwałą pamięć przekroczeń i liczniki. Historia zdarzeń w logu " +
+              "zostaje. Wykonuj to tylko świadomie, np. po rozpoczęciu monitorowania nowego opakowania.")) {
     send("R");
   }
 };
 
-drawTicks();
+
+// Przy aktywnym połączeniu linia live powinna przychodzić co ok. 3 s.
+// Jeśli przez 15 s nic nie przyszło, nie pokazujemy starego werdyktu jako aktualnego.
+setInterval(() => {
+  if (state && rxChar && lastLiveAt && Date.now() - lastLiveAt > 15000 && !state.stale) {
+    state.stale = true;
+    render();
+  }
+}, 3000);
 
 /* ---------- instalacja i praca offline ---------- */
 
-// Rejestrujemy dopiero po wczytaniu strony, zeby nie konkurowac
-// o pasmo z fontami i pierwszym renderem.
+// Rejestrujemy po wczytaniu strony; aplikacja nie wymaga zewnętrznych zasobów.
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch(() => {
@@ -814,10 +870,7 @@ async function diagnose() {
     line("service worker:", sw, sw !== "aktywny"),
     line("manifest:", man, man !== "OK"),
     line("bluetooth:", ble, ble !== "dostępny")
-  ].join("<br>") +
-  (standalone
-    ? '<br><span class="mute">uprawnienia trzyma Chrome, nie ta ikona</span>'
-    : "");
+  ].join("<br>");
 }
 
 diagnose();

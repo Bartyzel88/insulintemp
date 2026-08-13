@@ -1,7 +1,7 @@
 {
-  "name": "InsuTemp — monitor temperatury insuliny",
+  "name": "InsuTemp — monitor warunków przechowywania insuliny",
   "short_name": "InsuTemp",
-  "description": "Odczyt czujnika temperatury insuliny przez Bluetooth: bieżący stan, pamięć przekroczeń i historia zdarzeń.",
+  "description": "Odczyt sondy temperatury przy opakowaniu insuliny przez Bluetooth: bieżący stan, trwała pamięć przekroczeń i historia zdarzeń.",
   "lang": "pl",
   "dir": "ltr",
   "start_url": "./",

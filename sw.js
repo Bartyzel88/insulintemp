@@ -1,20 +1,17 @@
 /*
  * Service worker InsuTemp.
  *
- * Strategia jest celowo mieszana, bo dwa cele sie tu gryza: aplikacja ma
- * dzialac bez sieci przy lodowce, ale poprawka w kodzie ma byc widoczna od razu,
- * a nie po tygodniu.
- *
+ * Strategia:
  *   dokument HTML  -> najpierw siec, cache jako awaryjny
- *                     (poprawki widoczne natychmiast, offline nadal dziala)
- *   ikony, manifest -> najpierw cache
- *   fonty Google    -> najpierw cache, dociagane w tle po pierwszym uzyciu
+ *   lokalne zasoby -> najpierw cache
  *
- * Po kazdej zmianie plikow PODNIES numer wersji ponizej. Bez tego stare
- * zasoby zostana w cache.
+ * Aplikacja nie korzysta z zewnetrznych fontow ani bibliotek CDN, dlatego po
+ * pierwszym poprawnym zaladowaniu cala powloka aplikacji moze dzialac offline.
+ *
+ * Po kazdej zmianie plikow PODNIES numer wersji ponizej, aby uniewaznic stary cache.
  */
 
-const VERSION = "insutemp-v7";
+const VERSION = "insutemp-v8";
 
 const SHELL = [
   "./",
@@ -30,7 +27,6 @@ const SHELL = [
 self.addEventListener("install", event => {
   event.waitUntil(
     caches.open(VERSION)
-      // addAll przerywa calosc przy jednym bledzie, wiec kazdy zasob osobno
       .then(cache => Promise.allSettled(SHELL.map(url => cache.add(url))))
       .then(() => self.skipWaiting())
   );
@@ -51,36 +47,29 @@ self.addEventListener("fetch", event => {
   if (req.method !== "GET") return;
 
   const url = new URL(req.url);
-  const isFont = url.hostname === "fonts.googleapis.com" ||
-                 url.hostname === "fonts.gstatic.com";
+  if (url.origin !== self.location.origin) return;
 
   // Dokument: najpierw siec. Swieza wersja wygrywa, cache ratuje offline.
   if (req.mode === "navigate" || req.destination === "document") {
     event.respondWith(
       fetch(req)
         .then(res => {
-          caches.open(VERSION).then(c => c.put("./index.html", res.clone()));
+          if (res.ok) caches.open(VERSION).then(c => c.put("./index.html", res.clone()));
           return res;
         })
-        .catch(() => caches.match("./index.html")
-                       .then(hit => hit || caches.match("./")))
+        .catch(() => caches.match("./index.html").then(hit => hit || caches.match("./")))
     );
     return;
   }
 
-  // Reszta: najpierw cache, w tle uzupelniaj.
-  if (url.origin === self.location.origin || isFont) {
-    event.respondWith(
-      caches.match(req).then(hit => {
-        if (hit) return hit;
-        return fetch(req).then(res => {
-          // Odpowiedzi cross-origin sa nieprzezroczyste, ale daja sie zapisac.
-          if (res.ok || res.type === "opaque") {
-            caches.open(VERSION).then(c => c.put(req, res.clone()));
-          }
-          return res;
-        });
-      })
-    );
-  }
+  // Lokalne zasoby statyczne: najpierw cache.
+  event.respondWith(
+    caches.match(req).then(hit => {
+      if (hit) return hit;
+      return fetch(req).then(res => {
+        if (res.ok) caches.open(VERSION).then(c => c.put(req, res.clone()));
+        return res;
+      });
+    })
+  );
 });
