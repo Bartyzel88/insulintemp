@@ -11,7 +11,7 @@
  * Po kazdej zmianie plikow PODNIES numer wersji ponizej, aby uniewaznic stary cache.
  */
 
-const VERSION = "insutemp-v8";
+const VERSION = "insutemp-v11";
 
 const SHELL = [
   "./",

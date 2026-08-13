@@ -303,6 +303,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
       <div class="verdict" id="verdict">Czekam na odczyt</div>
       <div class="context" id="context">—</div>
       <div class="context" id="air" style="margin-top:2px">—</div>
+      <div class="context" id="access" style="margin-top:2px">—</div>
     </div>
   </section>
 
@@ -339,8 +340,10 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
     <button id="btnMeasure">Zmierz teraz</button>
     <button id="btnLog">Pobierz log</button>
     <button id="btnCsv" disabled>Zapisz CSV</button>
-    <button id="btnCalib">Kalibruj w lodzie</button>
+    <button id="btnCalibStart">1. Otwórz okno kalibracji</button>
+    <button id="btnCalib">2. Kalibruj w lodzie</button>
     <button class="danger" id="btnReset">Zeruj pamięć</button>
+    <button class="danger hidden" id="btnRepairFs">Napraw pamięć (kasuje dane)</button>
   </div>
 
   <h2>Zdarzenia</h2>
@@ -549,6 +552,10 @@ function parseLive(line) {
     outMax:      Number.isFinite(+f[32]) ? +f[32] : 30,
     cookLimit:   Number.isFinite(+f[33]) ? +f[33] : 37,
     stateError:  f.length > 34 ? f[34] === "1" : false,
+    calibWindow: f.length > 35 ? f[35] === "1" : false,
+    usbPresent:  f.length > 36 ? f[36] === "1" : false,
+    bonded:      f.length > 37 ? f[37] === "1" : false,
+    writeOk:     f.length > 38 ? f[38] === "1" : true,
     stale: false
   };
 }
@@ -562,6 +569,18 @@ function verdictOf(s) {
     return { txt:"Dane nieaktualne", tone:"amber",
              sub:"brak połączenia — ostatni odczyt nie jest aktualizowany" };
 
+  if (s.frozen)
+    return { txt:"Wykryto ryzyko zamarznięcia", tone:"cold",
+             sub:(!s.sensorOk ? "sprawdź zalecenia producenta; dodatkowo sonda obecnie nie odpowiada"
+                              : s.stateError ? "sprawdź zalecenia producenta; dodatkowo wystąpił błąd pamięci"
+                              : "sprawdź zalecenia producenta przed użyciem") };
+
+  if (s.cooked)
+    return { txt:"Krytyczne przekroczenie ciepła", tone:"hot",
+             sub:(!s.sensorOk ? "sprawdź zalecenia producenta; dodatkowo sonda obecnie nie odpowiada"
+                              : s.stateError ? "sprawdź zalecenia producenta; dodatkowo wystąpił błąd pamięci"
+                              : "sprawdź ulotkę lub skonsultuj farmaceutę") };
+
   if (!s.sensorOk)
     return { txt:"Brak wiarygodnego odczytu", tone:"amber",
              sub:"sonda główna nie odpowiada" };
@@ -569,14 +588,6 @@ function verdictOf(s) {
   if (s.stateError)
     return { txt:"Błąd pamięci trwałej", tone:"amber",
              sub:"historia alarmów może nie przetrwać utraty zasilania — sprawdź urządzenie" };
-
-  if (s.frozen)
-    return { txt:"Wykryto ryzyko zamarznięcia", tone:"cold",
-             sub:"sprawdź zalecenia producenta przed użyciem" };
-
-  if (s.cooked)
-    return { txt:"Krytyczne przekroczenie ciepła", tone:"hot",
-             sub:"sprawdź ulotkę lub skonsultuj farmaceutę" };
 
   const out = s.mode === 2;
   const lo  = out ? -Infinity : s.fridgeMin, hi = out ? s.outMax : s.fridgeMax;
@@ -589,13 +600,17 @@ function verdictOf(s) {
     return { txt:"Ciepło — ostrzeżenie", tone:"amber",
              sub:"powyżej progu ostrzegawczego, jeszcze poniżej progu alarmowego" };
 
-  if (s.modeMismatch)
-    return { txt:"Sprawdź wybrany tryb", tone:"amber",
-             sub:"temperatura powietrza nie pasuje do ustawienia" };
-
   if (s.latchCold || s.latchWarm)
     return { txt:"Sprawdź historię przekroczeń", tone: s.latchWarm ? "hot" : "cold",
              sub:"wcześniej przekroczono ustawiony próg" };
+
+  if (s.calibWindow)
+    return { txt:"Okno kalibracyjne — ochrona wstrzymana", tone:"amber",
+             sub:"przekroczenia nie są teraz zapisywane" };
+
+  if (s.modeMismatch)
+    return { txt:"Sprawdź wybrany tryb", tone:"amber",
+             sub:"temperatura powietrza nie pasuje do ustawienia" };
 
   return { txt:"W ustawionym zakresie", tone:"safe", sub:"brak wykrytego przekroczenia" };
 }
@@ -674,6 +689,24 @@ function render() {
   $("bBatt").style.background = s.batt < 15 ? "var(--amber)" : "var(--safe)";
 
   $("nOut").textContent = s.secOutside < 60 ? `${s.secOutside} s` : fmtMinutes(Math.floor(s.secOutside / 60));
+  $("btnRepairFs").classList.toggle("hidden", !s.stateError);
+  $("btnCalibStart").classList.toggle("hidden", s.calibWindow);
+
+  /*
+   * Odczyt jest zawsze dostępny; zmiana stanu wymaga powiązania utworzonego
+   * przy podłączonym kablu USB. Zamiast pozwalać na kliknięcie i pokazywać
+   * błąd, wyłączamy przyciski i mówimy wprost, co zrobić.
+   */
+  const wr = s.writeOk;
+  ["btnMeasure","btnFridge","btnOut","btnCalibStart","btnCalib",
+   "btnReset","btnRepairFs"].forEach(id => { $(id).disabled = !wr; });
+
+  $("access").textContent =
+      wr ? "dostęp: pełny (sparowano)"
+    : s.usbPresent ? "dostęp: tylko odczyt · USB podłączone, parowanie w toku"
+    : s.bonded ? "dostęp: tylko odczyt · brak szyfrowania, sprawdź parowanie w telefonie"
+    : "dostęp: tylko odczyt · podłącz USB do czujnika, żeby sparować";
+  $("access").className = "context " + (wr ? "mute" : "amber");
 }
 
 function setScar(el, show, temp) {
@@ -717,7 +750,10 @@ function renderLog() {
   const tone = { FREEZE_RISK:"cold", HEAT_CRITICAL:"hot", HEAT_DOSE:"hot",
                  EXC_START:"amber", EXC_END:"mute", PROBE_FAIL:"amber", AIR_FAIL:"amber",
                  PROBE_OK:"mute", AIR_OK:"mute", BATT_LOW:"amber", MODE_MISMATCH:"amber",
-                 MODE_MATCH:"mute", MODE_SET:"mute" };
+                 MODE_MATCH:"mute", MODE_SET:"mute",
+                 CALIB_START:"amber",
+                 PAIRED:"safe", PAIR_REJECTED:"hot", PAIR_FAIL:"amber",
+                 CMD_DENIED:"amber"};
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
@@ -762,6 +798,16 @@ $("btnMeasure").onclick = () => send("M");
 $("btnLog").onclick     = () => send("D");
 $("btnCsv").onclick     = saveCsv;
 
+$("btnCalibStart").onclick = () => {
+  if (!state) return;
+  if (confirm("Otworzyć okno kalibracyjne na 20 minut?\n\n" +
+              "W tym czasie urządzenie NIE zapisuje przekroczeń, więc kąpiel lodowa " +
+              "nie zaśmieci pamięci. Zanurz sondę dopiero po otwarciu okna.\n\n" +
+              "Okno zamyka się samo po 20 minutach albo po wykonaniu kalibracji.")) {
+    send("B");
+  }
+};
+
 $("btnCalib").onclick = () => {
   if (!state) return;
   if (!state.sensorOk) { alert("Sonda nie odpowiada. Sprawdź połączenie."); return; }
@@ -776,7 +822,10 @@ $("btnCalib").onclick = () => {
   if (confirm(`Przyjmuję, że sonda jest w prawidłowo przygotowanej kąpieli lodowo-wodnej, czyli blisko 0 °C.\n\n` +
               `Odczyt surowy: ${fmtTemp(surowy)} °C\n` +
               `Nowy offset: ${surowy > 0 ? "-" : "+"}${fmtTemp(Math.abs(surowy))} °C\n\n` +
-              `To koryguje offset; nie gwarantuje dokładności setnych stopnia.`)) {
+              `To koryguje offset; nie gwarantuje dokładności setnych stopnia.\n\n` +
+      (state.calibWindow
+        ? `Okno kalibracyjne jest otwarte, więc kąpiel nie zapisała przekroczeń. Kalibracja zamknie okno.`
+        : `UWAGA: okno kalibracyjne jest zamknięte, więc kąpiel lodowa mogła już utworzyć zapis przekroczenia. Jeśli monitorujesz nowe opakowanie, po zakończeniu użyj „Zeruj pamięć”.`))) {
     send("K");
   }
 };
@@ -785,6 +834,13 @@ $("btnReset").onclick = () => {
   if (confirm("Zerujesz trwałą pamięć przekroczeń i liczniki. Historia zdarzeń w logu " +
               "zostaje. Wykonuj to tylko świadomie, np. po rozpoczęciu monitorowania nowego opakowania.")) {
     send("R");
+  }
+};
+
+$("btnRepairFs").onclick = () => {
+  if (confirm("To jest operacja awaryjna. Sformatuje pamięć urządzenia i BEZPOWROTNIE skasuje log, kalibrację, zatrzaski oraz liczniki.\n\n" +
+              "Używaj jej tylko wtedy, gdy aplikacja stale pokazuje błąd pamięci i akceptujesz utratę całej historii.")) {
+    send("I!KASUJ");
   }
 };
 
