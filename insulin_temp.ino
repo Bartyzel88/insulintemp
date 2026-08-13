@@ -44,6 +44,7 @@
  *   O            ustaw tryb POZA LODOWKA / TRANSPORT
  *   R            zeruj liczniki i zatrzaski po wymianie insuliny
  *   E            wymaz log
+ *   I            awaryjnie sformatuj pamiec trwala i uruchom ponownie (KASUJE historie)
  * -------------------------------------------------------------------
  */
 
@@ -54,6 +55,8 @@
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
 #include <Adafruit_FlashTransport.h>
+#include <flash/flash_nrf5x.h>   // tylko flash_nrf5x_read, do testu pustego obszaru
+#include <type_traits>
 #include <stddef.h>
 
 using namespace Adafruit_LittleFS_Namespace;
@@ -143,8 +146,9 @@ static const float MODE_HINT_OUT    = 12.0f;
 static const uint8_t MODE_MISMATCH_CONFIRM_N = 2;
 
 // --- trwały stan: zapis rzadki, zdarzeniowy ---
-// 1024 B to 28 rekordow po 36 B, czyli jeden blok flash. Rotacja i tak tylko
-// przelacza sie miedzy dwoma plikami, wiec wiecej rekordow nic nie daje.
+// 1024 B to ok. 28 rekordow po 36 B. To celowo niewielki prog rotacji
+// dziennika; nie jest to rozmiar fizycznego bloku flash. Dwa pliki zapewniaja
+// odpornosc na utrate zasilania w trakcie przejscia na nowy dziennik.
 static const uint32_t STATE_JOURNAL_MAX_BYTES = 1024;
 static const uint32_t STATE_SAVE_HEAT_S = 300;      // co 5 min przy T > OUT_MAX
 static const uint32_t STATE_SAVE_ACTIVE_S = 1800;   // co 30 min gdy liczniki rosna
@@ -176,6 +180,21 @@ static const uint32_t LED_PERIOD_CRIT_SLOW_S = 30;
 static const uint32_t CRIT_FAST_WINDOW_S     = 24UL * 3600UL;  // nowy zatrzask
 static const uint32_t CRIT_FAST_REMIND_S     = 3600UL;         // po restarcie
 
+// --- okno kalibracyjne ---
+/*
+ * Kapiel lodowa przy 0 C sama tworzy przekroczenie: w trybie LODOWKA odczyt
+ * jest ponizej FRIDGE_MIN, a przy lekko ujemnej wartosci takze ponizej
+ * FREEZE_LIMIT. Procedura kontrolna zasmiecalaby wiec rejestr bezpieczenstwa.
+ *
+ * Okno kalibracyjne wstrzymuje zatrzaski i liczenie ekspozycji. Otwiera je
+ * komenda B PRZED zanurzeniem sondy, bo przekroczenie powstaje w trakcie
+ * dziesieciu minut wychlodzenia, a nie w chwili nacisniecia K.
+ *
+ * Ochrona przed zapomnieniem: okno wygasa samo, jest widoczne na diodzie
+ * i w aplikacji, a kazde otwarcie i zamkniecie trafia do logu.
+ */
+static const uint32_t CALIB_WINDOW_S = 1200UL;   // 20 minut
+
 // --- bateria ---
 // XIAO nRF52840 mierzy VBAT przez dzielnik 1M / 510k. Zmierz multimetrem
 // i skoryguj ten mnoznik, egzemplarze roznia sie o kilka procent.
@@ -200,6 +219,7 @@ static const float VBAT_FULL    = 4.15f;
 static const char *LOG_PATH        = "/insulin.csv";
 static const uint32_t LOG_MAX_BYTES  = 4000;   // ~65 zdarzen, czyli tygodnie historii
 static const uint32_t LOG_KEEP_BYTES = 2000;   // ile zostaje po rotacji
+static uint8_t logRotateBuf[LOG_KEEP_BYTES]; // staly bufor: brak ryzyka malloc podczas rotacji
 
 // --- BLE ---
 static const char *DEVICE_NAME = "InsuTemp";
@@ -241,14 +261,32 @@ static uint32_t excursionStartS   = 0;
 
 static uint32_t secondsOutOfRange = 0;   // czas poza wybranym oknem
 static uint32_t secondsOutOfFridge= 0;   // czas w trybie POZA LODOWKA
-static uint32_t lastEvalS         = 0;   // baza do rzeczywistego delta-t
+static uint32_t lastEvalS         = 0;   // baza do delta-t temperatury (tylko gdy sonda dziala)
+static uint32_t lastModeAccountS  = 0;   // niezalezny zegar czasu w trybie POZA LODOWKA
+static bool     modeClockStarted  = false;
 static bool     stateDirty        = false;
 static bool     fsOk              = false;
 static bool     statePersistError = false;
 static uint32_t lastStateSaveS    = 0;
 static uint32_t stateSeq          = 0;
 static char     activeStatePath   = 'A';
+static bool     stateJournalNeedsRollover = false; // uszkodzony/urwany ogon dziennika
 static uint32_t critFastUntilS    = 0;   // do kiedy alarm krytyczny miga czesto
+static uint32_t calibWindowUntilS = 0;   // do kiedy zatrzaski sa wstrzymane
+
+// --- ochrona zapisu ---
+/*
+ * Model zagrozenia: obcy telefon w zasiegu radia, np. na lotnisku. Ma widziec
+ * odczyty i historie, ale nie moze niczego zmienic ani skasowac.
+ *
+ * Uprawnienie do zapisu wynika z DOWODU POSIADANIA urzadzenia, a nie ze znajomosci
+ * sekretu. Powiazanie tworzymy wylacznie przy podlaczonym kablu USB. Sekretu nie ma,
+ * wiec nie ma czego wyciec ani zapomniec, a kabel jest zawsze droga powrotna:
+ * usuniete parowanie w telefonie, nowy telefon czy uszkodzona pamiec powiazan
+ * oznaczaja tylko ponowne sparowanie przy kablu. Nie istnieje stan bez wyjscia.
+ */
+static bool     bondAuthorized    = false;  // trwale: powiazanie powstalo przy USB
+static uint16_t activeConn        = BLE_CONN_HANDLE_INVALID;
 
 static float    vbat              = 0.0f;
 static uint8_t  battPercent       = 100;
@@ -307,7 +345,7 @@ static bool tmpRead16(uint8_t reg, uint16_t &val) {
 /*
  * Jeden pomiar w trybie one-shot.
  * Config = 0x0C20: MOD[11:10]=11 (one-shot), AVG[6:5]=01 (usrednianie z 8 probek).
- * Konwersja trwa ~124 ms, potem uklad sam wraca do shutdown (~150 nA).
+ * Konwersja trwa ~124 ms, potem uklad sam wraca do shutdown (setki nA).
  * I2C wlaczamy tylko na czas pomiaru - peryferium TWIM pobiera prad gdy aktywne.
  */
 static bool readAirSensor(float &out) {
@@ -359,8 +397,10 @@ static bool readAirSensor(float &out) {
  * wiec przekrecony bit zostanie wylapany, a nie zapisany do logu jako pomiar.
  */
 
-// Ustawia 11 bitow rozdzielczosci (0,125 C; krótsza konwersja). Zapis dotyczy pamieci ulotnej ukladu,
-// wiec powtarzamy go po kazdym odzyskaniu sondy.
+// Ustawia 11 bitow rozdzielczosci (0,125 C; krotsza konwersja). WRITE SCRATCHPAD
+// nie wykonuje COPY SCRATCHPAD do EEPROM, wiec po restarcie/zasileniu samej sondy
+// uklad moze wrocic do 12 bitow. Dlatego konfigurujemy go PRZED kazda konwersja.
+// Koszt to kilka bajtow 1-Wire raz na minute, a odzyskanie po zaniku zasilania jest pewne.
 static bool probeConfigure() {
   if (!oneWire.reset()) return false;
   oneWire.skip();
@@ -457,9 +497,7 @@ static void rotateLogIfNeeded() {
   uint32_t sz = logSize();
   if (sz < LOG_MAX_BYTES) return;
 
-  uint8_t *buf = (uint8_t *)malloc(LOG_KEEP_BYTES);
-  if (!buf) { InternalFS.remove(LOG_PATH); return; }   // ostatecznosc
-
+  uint8_t *buf = logRotateBuf;
   int n = 0;
   File f(InternalFS);
   if (f.open(LOG_PATH, FILE_O_READ)) {
@@ -467,7 +505,12 @@ static void rotateLogIfNeeded() {
     n = f.read(buf, LOG_KEEP_BYTES);
     f.close();
   }
-  InternalFS.remove(LOG_PATH);
+  // FILE_O_WRITE w tej implementacji LittleFS dopisuje do istniejacego pliku.
+  // Jezeli usuniecie starego logu sie nie uda, nie wolno "rotowac" przez append,
+  // bo plik tylko by rosl i mogl wypelnic system plikow.
+  if (InternalFS.exists(LOG_PATH)) {
+    if (!InternalFS.remove(LOG_PATH) || InternalFS.exists(LOG_PATH)) return;
+  }
 
   if (n > 0) {
     int start = 0;                       // pomin urwana pierwsza linie
@@ -481,7 +524,6 @@ static void rotateLogIfNeeded() {
       g.close();
     }
   }
-  free(buf);
 }
 
 static void appendLog(const char *line) {
@@ -512,19 +554,9 @@ static void logEvent(const char *type, const char *detail) {
   appendLog(line);
 }
 
-static bool saveConfig() {
-  if (!fsOk) return false;
-  InternalFS.remove(CFG_PATH);
-  File f(InternalFS);
-  if (!f.open(CFG_PATH, FILE_O_WRITE)) return false;
-  char b[32];
-  int n = snprintf(b, sizeof(b), "%.4f\n", probeOffset);
-  int written = f.write((const uint8_t *)b, n);
-  f.close();
-  return written == n;
-}
-
-static void loadConfig() {
+static void loadLegacyConfig() {
+  // Migracja z wersji <= v3: dawniej offset byl w /cfg.txt. Nowe rekordy stanu
+  // przechowuja go razem z CRC i dziennikiem, wiec tego pliku juz nie nadpisujemy.
   if (!fsOk) return;
   File f(InternalFS);
   if (!f.open(CFG_PATH, FILE_O_READ)) return;
@@ -533,7 +565,7 @@ static void loadConfig() {
   f.close();
   if (n > 0) {
     float v = atof(b);
-    if (v > -10.0f && v < 10.0f) probeOffset = v;   // sanity, nie ufaj plikowi
+    if (v > -10.0f && v < 10.0f) probeOffset = v;
   }
 }
 
@@ -554,9 +586,16 @@ struct __attribute__((packed)) StateRecord {
   int16_t warmScarCenti;
   uint32_t crc;
 };
+static_assert(sizeof(StateRecord) == 36, "Nieoczekiwany rozmiar StateRecord");
 
 static const uint32_t STATE_MAGIC = 0x49535432UL; // "IST2"
 static const uint16_t STATE_VERSION = 2;
+static const uint8_t STATE_FLAG_FROZEN       = 0x01;
+static const uint8_t STATE_FLAG_COOKED       = 0x02;
+static const uint8_t STATE_FLAG_COLD_LATCH   = 0x04;
+static const uint8_t STATE_FLAG_WARM_LATCH   = 0x08;
+static const uint8_t STATE_FLAG_OFFSET_VALID = 0x10; // reserved = offset w 0,001 C
+static const uint8_t STATE_FLAG_BOND_OK      = 0x20; // powiazanie utworzone przy USB
 
 static uint32_t crc32Bytes(const uint8_t *data, size_t len) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -580,11 +619,22 @@ static bool scanStateFile(const char *path, StateRecord &best) {
   File f(InternalFS);
   if (!f.open(path, FILE_O_READ)) return false;
   bool found = false;
+  bool invalidRecord = false;
+  uint32_t bytesRead = 0;
   StateRecord r;
-  while (f.read((uint8_t *)&r, sizeof(r)) == (int)sizeof(r)) {
-    if (validStateRecord(r) && (!found || r.seq > best.seq)) { best = r; found = true; }
+  int n;
+  while ((n = f.read((uint8_t *)&r, sizeof(r))) > 0) {
+    bytesRead += (uint32_t)n;
+    if (n != (int)sizeof(r)) { invalidRecord = true; break; }
+    if (validStateRecord(r)) {
+      if (!found || r.seq > best.seq) { best = r; found = true; }
+    } else {
+      invalidRecord = true;
+    }
   }
+  uint32_t total = f.size();
   f.close();
+  if (invalidRecord || bytesRead != total) stateJournalNeedsRollover = true;
   return found;
 }
 
@@ -599,10 +649,14 @@ static uint32_t stateFileSize(const char *path) {
 
 static void applyState(const StateRecord &r) {
   mode = (Mode)r.mode;
-  frozenLatch  = r.flags & 0x01;
-  cookedLatch  = r.flags & 0x02;
-  latchTooCold = r.flags & 0x04;
-  latchTooWarm = r.flags & 0x08;
+  frozenLatch  = r.flags & STATE_FLAG_FROZEN;
+  cookedLatch  = r.flags & STATE_FLAG_COOKED;
+  bondAuthorized = r.flags & STATE_FLAG_BOND_OK;
+  latchTooCold = r.flags & STATE_FLAG_COLD_LATCH;
+  latchTooWarm = r.flags & STATE_FLAG_WARM_LATCH;
+  // W rekordach ze starszej wersji bit nie byl ustawiony; wtedy zachowujemy
+  // offset wczytany z dawnego /cfg.txt. Rozmiar rekordu i wersja pozostaja zgodne.
+  if (r.flags & STATE_FLAG_OFFSET_VALID) probeOffset = (int16_t)r.reserved / 1000.0f;
   secondsAboveMax    = r.secondsAboveMax;
   secondsOutOfRange  = r.secondsOutOfRange;
   secondsOutOfFridge = r.secondsOutOfFridge;
@@ -616,7 +670,13 @@ static void loadPersistentState() {
   StateRecord a = {}, b = {};
   bool okA = scanStateFile(STATE_A_PATH, a);
   bool okB = scanStateFile(STATE_B_PATH, b);
-  if (!okA && !okB) return;
+  if (!okA && !okB) {
+    // Brak plikow = pierwszy start. Niepuste, ale bez ani jednego poprawnego
+    // rekordu = utrata wiarygodnej historii i musi byc widocznym bledem.
+    if (stateFileSize(STATE_A_PATH) || stateFileSize(STATE_B_PATH) || stateJournalNeedsRollover)
+      statePersistError = true;
+    return;
+  }
 
   if (okA && (!okB || a.seq >= b.seq)) { applyState(a); activeStatePath = 'A'; }
   else                                  { applyState(b); activeStatePath = 'B'; }
@@ -629,8 +689,13 @@ static StateRecord makeStateRecord() {
   r.size = sizeof(StateRecord);
   r.seq = ++stateSeq;
   r.mode = (uint8_t)mode;
-  r.flags = (frozenLatch ? 0x01 : 0) | (cookedLatch ? 0x02 : 0) |
-            (latchTooCold ? 0x04 : 0) | (latchTooWarm ? 0x08 : 0);
+  r.flags = (frozenLatch ? STATE_FLAG_FROZEN : 0) |
+            (cookedLatch ? STATE_FLAG_COOKED : 0) |
+            (latchTooCold ? STATE_FLAG_COLD_LATCH : 0) |
+            (latchTooWarm ? STATE_FLAG_WARM_LATCH : 0) |
+            (bondAuthorized ? STATE_FLAG_BOND_OK : 0) |
+            STATE_FLAG_OFFSET_VALID;
+  r.reserved = (uint16_t)(int16_t)lroundf(constrain(probeOffset, -10.0f, 10.0f) * 1000.0f);
   r.secondsAboveMax = secondsAboveMax;
   r.secondsOutOfRange = secondsOutOfRange;
   r.secondsOutOfFridge = secondsOutOfFridge;
@@ -647,22 +712,32 @@ static bool appendStateRecord(bool forceRollover = false) {
   uint32_t sz = stateFileSize(cur);
   StateRecord r = makeStateRecord();
 
-  if (forceRollover || sz + sizeof(r) > STATE_JOURNAL_MAX_BYTES) {
+  if (forceRollover || stateJournalNeedsRollover || sz + sizeof(r) > STATE_JOURNAL_MAX_BYTES) {
     // Najpierw zapisujemy swiezy rekord do drugiego pliku. Stary pozostaje,
     // wiec utrata zasilania w trakcie rotacji nie kasuje ostatniego stanu.
-    InternalFS.remove(other);
+    // FILE_O_WRITE dopisuje do istniejacego pliku, dlatego usuniecie celu
+    // rotacji musi byc potwierdzone. W przeciwnym razie swiezy rekord moglby
+    // trafic za uszkodzony ogon poprzedniego dziennika.
+    if (InternalFS.exists(other)) {
+      if (!InternalFS.remove(other) || InternalFS.exists(other)) {
+        stateSeq--;
+        stateJournalNeedsRollover = true;
+        return false;
+      }
+    }
     File g(InternalFS);
     if (!g.open(other, FILE_O_WRITE)) { stateSeq--; return false; }
     int n = g.write((const uint8_t *)&r, sizeof(r));
     g.close();
-    if (n != (int)sizeof(r)) { stateSeq--; return false; }
+    if (n != (int)sizeof(r)) { stateSeq--; stateJournalNeedsRollover = true; return false; }
     activeStatePath = activeStatePath == 'A' ? 'B' : 'A';
+    stateJournalNeedsRollover = false;
   } else {
     File f(InternalFS);
     if (!f.open(cur, FILE_O_WRITE)) { stateSeq--; return false; }
     int n = f.write((const uint8_t *)&r, sizeof(r));
     f.close();
-    if (n != (int)sizeof(r)) { stateSeq--; return false; }
+    if (n != (int)sizeof(r)) { stateSeq--; stateJournalNeedsRollover = true; return false; }
   }
 
   stateDirty = false;
@@ -812,17 +887,47 @@ static void ledService() {
 
 // =========================== LOGIKA ALARMU ==========================
 
+// Czas w trybie POZA LODOWKA jest cecha trybu, nie czujnika. Musi rosnac nawet
+// wtedy, gdy DS18B20 chwilowo nie odpowiada. Rozdzielamy go od delta-t temperatury.
+static void evaluateAlarms(float t, uint32_t deltaS);
+
+static bool calibWindowActive() {
+  return calibWindowUntilS && uptimeSec() < calibWindowUntilS;
+}
+
+static void accountModeTime(uint32_t nowS) {
+  if (!modeClockStarted) {
+    lastModeAccountS = nowS;
+    modeClockStarted = true;
+    return;
+  }
+  uint32_t deltaS = nowS - lastModeAccountS;
+  lastModeAccountS = nowS;
+  if (mode == MODE_OUT && deltaS) {
+    secondsOutOfFridge = (UINT32_MAX - secondsOutOfFridge < deltaS)
+                         ? UINT32_MAX : secondsOutOfFridge + deltaS;
+    markStateDirty();
+  }
+}
+
 static void setMode(Mode newMode, const char *source) {
   if (newMode != MODE_FRIDGE && newMode != MODE_OUT) return;
   if (mode == newMode) return;
+  uint32_t nowS = uptimeSec();
+  accountModeTime(nowS);             // dopisz czas starego trybu do chwili zmiany
   mode = newMode;
   mismatchCount = 0;
   modeMismatch = false;
-  lastEvalS = uptimeSec(); // nie przypisuj czasu sprzed zmiany do nowego trybu
+  lastEvalS = nowS;       // nie przypisuj czasu sprzed zmiany do nowego trybu
   char d[64];
   snprintf(d, sizeof(d), "%s;%s", newMode == MODE_FRIDGE ? "lodowka" : "poza_lodowka", source);
   logEvent("MODE_SET", d);
   persistStateNow();
+
+  // Biezacy odczyt ma od razu odpowiadac nowym progom. deltaS=0 oznacza,
+  // ze zmiana trybu nie dopisuje ani sekundy ekspozycji.
+  if (probeOk) evaluateAlarms(lastTempC, 0);
+  else alarmActive = true;
 }
 
 static void updateModeMismatch(float air) {
@@ -849,6 +954,21 @@ static void updateModeMismatch(float air) {
 static void evaluateAlarms(float t, uint32_t deltaS) {
   bool criticalChanged = false;
   bool latchChanged = false;
+
+  /*
+   * Okno kalibracyjne: nadal mierzymy i pokazujemy stan biezacy, ale nie
+   * zapisujemy niczego do pamieci przekroczen. Inaczej sama kontrola jakosci
+   * sondy podwazalaby wiarygodnosc rejestru, ktory ma chronic insuline.
+   */
+  if (calibWindowActive()) {
+    float loC = mode == MODE_OUT ? -100.0f : FRIDGE_MIN;
+    float hiC = mode == MODE_OUT ? OUT_MAX : FRIDGE_MAX;
+    liveTooCold = t < loC;
+    liveTooWarm = t > hiC;
+    liveWarmWarning = (mode == MODE_OUT && t > OUT_WARN && t <= OUT_MAX);
+    alarmActive = frozenLatch || cookedLatch || latchTooCold || latchTooWarm;
+    return;
+  }
 
   // T < 0 C oznacza wykrycie ryzyka zamarzniecia przy tej sondzie;
   // nie jest bezposrednim dowodem krystalizacji cieczy.
@@ -883,11 +1003,6 @@ static void evaluateAlarms(float t, uint32_t deltaS) {
                (unsigned long)secondsAboveMax, OUT_MAX);
       logEvent("HEAT_DOSE", d);
     }
-  }
-
-  if (mode == MODE_OUT && deltaS) {
-    secondsOutOfFridge = (UINT32_MAX - secondsOutOfFridge < deltaS) ? UINT32_MAX : secondsOutOfFridge + deltaS;
-    markStateDirty();
   }
 
   float lo = mode == MODE_OUT ? -100.0f : FRIDGE_MIN;
@@ -937,7 +1052,6 @@ static void evaluateAlarms(float t, uint32_t deltaS) {
   alarmActive = inExcursion || cookedLatch || frozenLatch ||
                 (mode == MODE_OUT && t > OUT_WARN) || modeMismatch;
 
-  persistStateIfDue(t > OUT_MAX, bad || mode == MODE_OUT);
 }
 
 // ============================== POMIAR ==============================
@@ -945,8 +1059,14 @@ static void evaluateAlarms(float t, uint32_t deltaS) {
 static void doSample(bool forceAux = false) {
   lastSampleMs = millis();
 
+  uint32_t nowS = uptimeSec();
+  accountModeTime(nowS);
+
+  // Konfiguruj PRZED konwersja. Gdy sama sonda straci zasilanie, wraca do
+  // 12 bitow (do 750 ms); bez tego 400 ms oczekiwania mogloby uniemozliwic odzyskanie.
+  bool configured = probeConfigure();
   uint32_t convStart = millis();
-  bool started = probeStartConversion();
+  bool started = configured && probeStartConversion();
 
   // Kanaly pomocnicze probkujemy rzadziej, bo nie napedzaja krytycznych alarmow.
   bool sampleAir = forceAux || (uint32_t)(millis() - lastAirMs) >= AIR_PERIOD_MS || lastAirMs == 0;
@@ -959,22 +1079,30 @@ static void doSample(bool forceAux = false) {
     }
     airOk = aOk;
     lastAirMs = millis();
-    if (airOk) updateModeMismatch(airTempC);
+    if (airOk) {
+      updateModeMismatch(airTempC);
+    } else {
+      // Nie trzymaj ostrzezenia o trybie na podstawie starego odczytu powietrza.
+      mismatchCount = 0;
+      modeMismatch = false;
+    }
   }
 
-  while ((uint32_t)(millis() - convStart) < PROBE_CONV_MS) delay(10);
+  if (started) {
+    while ((uint32_t)(millis() - convStart) < PROBE_CONV_MS) delay(10);
+  }
 
   float t;
   bool ok = started && probeRead(t);
-  if (ok != probeOk) {
-    logEvent(ok ? "PROBE_OK" : "PROBE_FAIL", ok ? "sonda odpowiada" : "brak odpowiedzi 1-Wire");
-    if (ok) probeConfigure();
-  }
+  bool oldProbeOk = probeOk;
   probeOk = ok;
+  if (probeOk) lastTempC = t;
+  if (ok != oldProbeOk) {
+    logEvent(ok ? "PROBE_OK" : "PROBE_FAIL",
+             ok ? "sonda odpowiada" : "brak odpowiedzi 1-Wire; temperatura w kolumnie jest ostatnim poprawnym odczytem");
+  }
 
-  uint32_t nowS = uptimeSec();
   if (probeOk) {
-    lastTempC = t;
     if (t < minTempC) minTempC = t;
     if (t > maxTempC) maxTempC = t;
 
@@ -1002,16 +1130,27 @@ static void doSample(bool forceAux = false) {
 
   if (uptimeSec() - lastSummaryS >= SUMMARY_PERIOD_S) {
     lastSummaryS = uptimeSec();
-    char d[144];
-    snprintf(d, sizeof(d),
-             "min=%.2f;max=%.2f;powietrze=%.2f;pozaOknem=%lumin;pozaLodowka=%lumin;bat=%.2fV",
-             minTempC, maxTempC, airTempC,
-             (unsigned long)(secondsOutOfRange / 60UL),
-             (unsigned long)(secondsOutOfFridge / 60UL), vbat);
+    char d[160];
+    if (minTempC > 900.0f || maxTempC < -900.0f) {
+      snprintf(d, sizeof(d),
+               "min=NA;max=NA;powietrze=%.2f;pozaOknem=%lumin;pozaLodowka=%lumin;bat=%.2fV",
+               airTempC, (unsigned long)(secondsOutOfRange / 60UL),
+               (unsigned long)(secondsOutOfFridge / 60UL), vbat);
+    } else {
+      snprintf(d, sizeof(d),
+               "min=%.2f;max=%.2f;powietrze=%.2f;pozaOknem=%lumin;pozaLodowka=%lumin;bat=%.2fV",
+               minTempC, maxTempC, airTempC,
+               (unsigned long)(secondsOutOfRange / 60UL),
+               (unsigned long)(secondsOutOfFridge / 60UL), vbat);
+    }
     logEvent("DAILY", d);
     minTempC = 999.0f;
     maxTempC = -999.0f;
   }
+
+  // Checkpoint licznikow jest niezalezny od sprawnosci sondy glownej.
+  persistStateIfDue(probeOk && lastTempC > OUT_MAX,
+                    mode == MODE_OUT || (probeOk && (liveTooCold || liveTooWarm)));
 
   updateAdvertising();
 }
@@ -1027,7 +1166,7 @@ static void sendLine(const char *s) { bleuart.write((const uint8_t *)s, strlen(s
  * Pola 28..33 niosa aktualne progi, a pole 34 sygnalizuje blad pamieci trwalej.
  */
 static void sendLive() {
-  char b[440];
+  char b[520];
   float mn = (minTempC > 900.0f) ? lastTempC : minTempC;
   float mx = (maxTempC < -900.0f) ? lastTempC : maxTempC;
   uint32_t minOutRange = secondsOutOfRange / 60UL;
@@ -1036,7 +1175,7 @@ static void sendLive() {
   uint32_t minOutside = secondsOutOfFridge / 60UL;
   snprintf(b, sizeof(b),
     "#L,%.3f,%u,%u,%u,%u,%u,%u,%u,%.3f,%lu,%lu,%lu,%lu,%lu,%u,%lu,%u,%.2f,%.2f,"
-    "%.3f,%u,%.3f,%.2f,%.2f,%u,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u\n",
+    "%.3f,%u,%.3f,%.2f,%.2f,%u,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%u\n",
     lastTempC,
     (unsigned)mode,
     alarmActive ? 1u : 0u,
@@ -1060,12 +1199,17 @@ static void sendLive() {
     (unsigned long)secondsAboveMax,
     (unsigned long)secondsOutOfFridge,
     FREEZE_LIMIT, FRIDGE_MIN, FRIDGE_MAX, OUT_WARN, OUT_MAX, COOK_LIMIT,
-    statePersistError ? 1u : 0u);
+    statePersistError ? 1u : 0u,
+    calibWindowActive() ? 1u : 0u,
+    usbPowerPresent() ? 1u : 0u,
+    bondAuthorized ? 1u : 0u,
+    writeAllowed() ? 1u : 0u);
   sendLine(b);
 }
 
 static void dumpLog() {
   sendLine("#B\n");                       // znacznik poczatku dla aplikacji
+  if (!fsOk) { sendLine("#E\n"); return; }
   File f(InternalFS);
   if (f.open(LOG_PATH, FILE_O_READ)) {
     uint8_t buf[64];
@@ -1103,7 +1247,39 @@ static void sendStatus() {
   sendLine(b);
 }
 
+/*
+ * Podzial komend. Odczyt jest jawny, bo nie szkodzi: obcy moze zobaczyc
+ * temperature i historie. Zmiana stanu wymaga powiazania utworzonego przy USB.
+ *
+ * Bare "C" tylko podaje aktualna poprawke, wiec jest odczytem. "C<wartosc>"
+ * ja zmienia, wiec juz nie.
+ */
+static bool commandIsReadOnly(const char *cmd) {
+  switch (cmd[0]) {
+    case 'P': case 'p':
+    case 'S': case 's':
+    case 'D': case 'd':
+      return true;
+    case 'C': case 'c':
+      return cmd[1] == 0;
+    default:
+      return false;
+  }
+}
+
 static void handleCommand(char *cmd) {
+  if (!commandIsReadOnly(cmd) && !writeAllowed()) {
+    if (!bondAuthorized) {
+      sendLine("blad: brak sparowania. Podlacz USB do czujnika i polacz sie ponownie, "
+               "zeby sparowac. Odczyt dziala bez parowania.\n");
+    } else {
+      sendLine("blad: polaczenie nieszyfrowane. Sprawdz, czy telefon nadal ma "
+               "zapisane parowanie z czujnikiem.\n");
+    }
+    logEvent("CMD_DENIED", cmd);
+    return;
+  }
+
   switch (cmd[0]) {
     case 'D': case 'd': dumpLog();    break;
     case 'S': case 's': sendStatus(); break;
@@ -1148,19 +1324,47 @@ static void handleCommand(char *cmd) {
         sendLine(b);
         break;
       }
-      float arg = atof(cmd + 1);
+      char *end = nullptr;
+      float arg = strtof(cmd + 1, &end);
+      while (end && (*end == ' ' || *end == '\t')) end++;
+      if (end == cmd + 1 || (end && *end != 0) || arg != arg) {
+        sendLine("blad: uzyj np. C-0.24 albo C0\n");
+        break;
+      }
       if (arg < -10.0f || arg > 10.0f) { sendLine("blad: zakres +-10 C\n"); break; }
 
       float surowy = lastTempC - probeOffset;
       probeOffset = arg;
-      lastTempC = surowy + probeOffset;
-      if (!saveConfig()) statePersistError = true;
+      if (probeOk) {
+        lastTempC = surowy + probeOffset;
+        // Zmiana kalibracji moze przeniesc biezacy odczyt przez prog alarmowy.
+        // Oceniamy go od razu, ale z delta=0, wiec nie dopisujemy fikcyjnego czasu.
+        evaluateAlarms(lastTempC, 0);
+      }
+      persistStateNow();
+      updateAdvertising();
 
       char b[96];
       snprintf(b, sizeof(b), "offset ustawiony recznie=%+.3f C%s\n", probeOffset,
                statePersistError ? " [BLAD ZAPISU]" : "");
       sendLine(b);
       logEvent("CALIB", b);
+      break;
+    }
+
+    case 'B': case 'b': {
+      /*
+       * Otwarcie okna kalibracyjnego. Wykonaj PRZED zanurzeniem sondy, bo
+       * przekroczenie powstaje w trakcie dziesieciu minut wychlodzenia,
+       * a nie w chwili nacisniecia K.
+       */
+      calibWindowUntilS = uptimeSec() + CALIB_WINDOW_S;
+      char b[120];
+      snprintf(b, sizeof(b),
+               "okno kalibracyjne otwarte na %lu min: zatrzaski wstrzymane\n",
+               (unsigned long)(CALIB_WINDOW_S / 60UL));
+      sendLine(b);
+      logEvent("CALIB_START", "zatrzaski wstrzymane na czas kapieli lodowej");
       break;
     }
 
@@ -1178,12 +1382,23 @@ static void handleCommand(char *cmd) {
         break;
       }
 
+      bool oknoBylo = calibWindowActive();
+
       probeOffset = -surowy;
       lastTempC = surowy + probeOffset;
-      if (!saveConfig()) statePersistError = true;
 
-      char b[96];
-      snprintf(b, sizeof(b), "skalibrowano w lodzie, offset=%+.3f C%s\n", probeOffset,
+      // Kalibracja konczy procedure, wiec zamykamy okno i wracamy do ochrony.
+      calibWindowUntilS = 0;
+
+      // Jak przy recznym C: aktualizujemy stan biezacy bez doliczania czasu.
+      evaluateAlarms(lastTempC, 0);
+      persistStateNow();
+      updateAdvertising();
+
+      char b[160];
+      snprintf(b, sizeof(b), "skalibrowano w lodzie, offset=%+.3f C%s%s\n", probeOffset,
+               oknoBylo ? "; okno kalibracyjne zamkniete"
+                        : "; UWAGA: okno bylo zamkniete, sprawdz pamiec przekroczen",
                statePersistError ? " [BLAD ZAPISU]" : "");
       sendLine(b);
       logEvent("CALIB", b);
@@ -1202,25 +1417,58 @@ static void handleCommand(char *cmd) {
       minTempC = 999.0f;
       maxTempC = -999.0f;
       lastEvalS = uptimeSec();
+      lastModeAccountS = uptimeSec();
+      modeClockStarted = true;
       critFastUntilS = 0;
+      calibWindowUntilS = 0;
       logEvent("RESET", "nowa insulina / reczny reset pamieci");
+      if (probeOk) evaluateAlarms(lastTempC, 0);
+      else alarmActive = true;
       persistStateNow();
       updateAdvertising();
-      sendLine("pamiec przekroczen i liczniki wyzerowane\n");
+      sendLine("pamiec przekroczen i liczniki wyzerowane; biezacy pomiar oceniony ponownie\n");
+      break;
+
+    case 'I': case 'i':
+      // Operacja ratunkowa i destrukcyjna. Nigdy nie wykonujemy jej automatycznie
+      // po bledzie montowania, bo to mogloby skasowac odzyskiwalna historie.
+      /*
+       * Token jest wymagany, bo BLE nie jest tu uwierzytelnione: kazdy telefon
+       * w zasiegu moze sie polaczyc i wyslac komende. Jedna litera nie moze
+       * kasowac calej historii.
+       */
+      if (strcmp(cmd, "I!KASUJ") != 0) {
+        sendLine("blad: formatowanie wymaga potwierdzenia. Wyslij I!KASUJ\n");
+        break;
+      }
+      if (fsOk) InternalFS.end();
+      if (!InternalFS.format()) {
+        statePersistError = true;
+        sendLine("blad: format pamieci nie udal sie\n");
+        break;
+      }
+      sendLine("pamiec sformatowana; restart\n");
+      delay(100);
+      NVIC_SystemReset();
       break;
 
     case 'E': case 'e':
       if (!fsOk) { sendLine("blad: pamiec trwala niedostepna\n"); break; }
-      InternalFS.remove(LOG_PATH);
+      if (InternalFS.exists(LOG_PATH) &&
+          (!InternalFS.remove(LOG_PATH) || InternalFS.exists(LOG_PATH))) {
+        sendLine("blad: nie udalo sie wymazac logu\n");
+        break;
+      }
       logEvent("LOG_ERASED", "");
       sendLine("log wymazany\n");
       break;
 
     default:
-      sendLine("komendy: P M D S F O K C<offset> T<epoch> R E\n");
+      sendLine("komendy: P M D S F O B K C<offset> T<epoch> R E I!KASUJ\n");
   }
   if (cmd[0] == 'R' || cmd[0] == 'r' || cmd[0] == 'T' || cmd[0] == 't' ||
-      cmd[0] == 'E' || cmd[0] == 'e' || cmd[0] == 'C' || cmd[0] == 'c' ||
+      cmd[0] == 'E' || cmd[0] == 'e' || cmd[0] == 'I' || cmd[0] == 'i' ||
+      cmd[0] == 'C' || cmd[0] == 'c' || cmd[0] == 'B' || cmd[0] == 'b' ||
       cmd[0] == 'K' || cmd[0] == 'k' || cmd[0] == 'F' || cmd[0] == 'f' ||
       cmd[0] == 'O' || cmd[0] == 'o') {
     sendLive();                    // aplikacja od razu widzi skutek
@@ -1241,6 +1489,72 @@ static void serviceUart() {
 }
 
 // =============================== SETUP ==============================
+
+/*
+ * InternalFS.begin() w bibliotece Adafruit automatycznie formatuje obszar, gdy
+ * montowanie sie nie uda. Dla rejestru bezpieczenstwa to zbyt agresywne:
+ * uszkodzony, ale potencjalnie odzyskiwalny dziennik nie moze zniknac sam.
+ *
+ * Dlatego wywolujemy begin() klasy bazowej, ktore tylko montuje. Format wolno
+ * wykonac automatycznie jedynie na calkowicie pustym, fabrycznie skasowanym
+ * obszarze, czyli przy pierwszym uruchomieniu nowej plytki.
+ *
+ * WAZNE: ponizsze rzutowanie zadziala tylko wtedy, gdy Adafruit_LittleFS nie ma
+ * metod wirtualnych. Gdyby begin() bylo wirtualne, wywolalaby sie wersja
+ * pochodna z autoformatem, kod skompilowalby sie bez ostrzezenia, a ochrona
+ * zniknelaby PO CICHU. To najgorszy mozliwy tryb awarii, wiec zamieniamy go
+ * na blad kompilacji.
+ *
+ * Jesli ten static_assert nie przejdzie, nie obchodz go. Trzeba wtedy zamiast
+ * rzutowania uzyc innej drogi montowania bez autoformatu.
+ */
+static_assert(!std::is_polymorphic<Adafruit_LittleFS>::value,
+              "Adafruit_LittleFS ma metody wirtualne: rzutowanie na klase bazowa "
+              "nie ominie autoformatu w InternalFileSystem::begin(). Potrzebne "
+              "inne rozwiazanie, patrz komentarz powyzej.");
+
+/*
+ * Test pustego obszaru. Wylacznie ODCZYT, nigdy zapis ani kasowanie.
+ *
+ * Adres jest zaszyty, bo biblioteka nie udostepnia granic obszaru. Jest to
+ * jednak bezpieczne: gdyby stala kiedys przestala odpowiadac rzeczywistemu
+ * ukladowi pamieci, jedynym skutkiem bedzie zla ODPOWIEDZ, a nie uszkodzenie.
+ * Obszar programu nie sklada sie z samych 0xFF, wiec bledny adres da "nie jest
+ * pusty", czyli odmowe autoformatu, czyli kierunek ostrozny.
+ *
+ * Sam format wykonuje InternalFS.format(), ktory uzywa wlasnych, poprawnych
+ * granic biblioteki. Nie kasujemy stron recznie: obszar bezposrednio powyzej
+ * zajmuje bootloader, a pomylka o jeden region konczylaby sie plytka do
+ * odzyskiwania sprzetowego. Zysk z recznego kasowania nie usprawiedliwia
+ * takiego ryzyka.
+ */
+#if defined(NRF52840_XXAA)
+static const uint32_t INTERNAL_FS_ADDR  = 0xED000UL;
+static const uint32_t INTERNAL_FS_BYTES = 7UL * FLASH_NRF52_PAGE_SIZE;
+#endif
+
+static bool internalFsLooksBlank() {
+#if defined(NRF52840_XXAA)
+  uint8_t buf[32];
+  for (uint32_t off = 0; off < INTERNAL_FS_BYTES; off += sizeof(buf)) {
+    if (flash_nrf5x_read(buf, INTERNAL_FS_ADDR + off, sizeof(buf)) <= 0) return false;
+    for (uint8_t b : buf) if (b != 0xFF) return false;
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool beginInternalFsSafely() {
+  Adafruit_LittleFS &baseFs = static_cast<Adafruit_LittleFS &>(InternalFS);
+  if (baseFs.begin()) return true;
+
+  // Na calkowicie pustej pamieci nie ma historii do utracenia: to pierwszy start.
+  if (!internalFsLooksBlank()) return false;
+  if (!InternalFS.format()) return false;
+  return baseFs.begin();
+}
 
 static void powerDownExternalFlash() {
   // KRYTYCZNE. XIAO nRF52840 ma pamiec QSPI 2 MB, ktora po starcie pobiera
@@ -1264,13 +1578,79 @@ static void ledsOff() {
 static volatile bool identifyPending = false;
 static volatile bool livePending     = false;
 
-static void onConnect(uint16_t) {
+/*
+ * Wykrywanie napiecia na USB. Przy wlaczonym SoftDevice rejestry POWER naleza
+ * do niego, wiec pytamy przez wywolanie systemowe, a bezposredni odczyt zostaje
+ * jako awaryjny.
+ *
+ * Swiadomie sprawdzamy samo VBUS, nie enumeracje przez hosta, zeby parowanie
+ * dzialalo takze z ladowarki albo powerbanku. Konsekwencja: ladowanie w miejscu
+ * publicznym otwiera okno na nowe powiazanie. Jest to opisane w instrukcji.
+ */
+static bool usbPowerPresent() {
+  uint32_t status = 0;
+  if (sd_power_usbregstatus_get(&status) == NRF_SUCCESS) {
+    return (status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  }
+  return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+}
+
+// Zapis dozwolony tylko dla powiazania utworzonego przy USB, na zaszyfrowanym
+// polaczeniu. Odczyt pozostaje otwarty dla wszystkich.
+static bool writeAllowed() {
+  if (!bondAuthorized) return false;
+  BLEConnection *c = Bluefruit.Connection(activeConn);
+  return c && c->connected() && c->secured();
+}
+
+static void onConnect(uint16_t conn_handle) {
+  activeConn      = conn_handle;
   identifyPending = true;   // potwierdz, ze rozmawiasz z TYM urzadzeniem
   livePending     = true;
+
+  // O parowanie prosimy tylko przy kablu i tylko gdy powiazania jeszcze nie ma.
+  if (usbPowerPresent() && !bondAuthorized) {
+    BLEConnection *c = Bluefruit.Connection(conn_handle);
+    if (c) c->requestPairing();
+  }
 }
 
 static void onDisconnect(uint16_t, uint8_t) {
+  activeConn = BLE_CONN_HANDLE_INVALID;
   // advertising wraca sam, restartOnDisconnect(true)
+}
+
+/*
+ * Uzgodnienia parowania nie da sie odrzucic z poziomu tej biblioteki, ale da sie
+ * je uniewaznic natychmiast po zakonczeniu. Kierunek jest zamkniety: bez kabla
+ * powiazanie nie zostaje, a uprawnienie do zapisu gasnie.
+ *
+ * Skutek uboczny, swiadomie przyjety: ktos w zasiegu moze wymusic parowanie i tym
+ * samym uniewaznic Twoje, zmuszajac Cie do ponownego sparowania przy kablu. Nie
+ * zyskuje przy tym zadnego dostepu, a zdarzenie trafia do logu.
+ */
+static void onPairComplete(uint16_t conn_handle, uint8_t auth_status) {
+  if (auth_status != BLE_GAP_SEC_STATUS_SUCCESS) {
+    logEvent("PAIR_FAIL", "uzgodnienie parowania nie doszlo do skutku");
+    return;
+  }
+
+  if (usbPowerPresent()) {
+    bondAuthorized = true;
+    markStateDirty();
+    persistStateNow();
+    logEvent("PAIRED", "powiazanie utworzone przy podlaczonym USB");
+    return;
+  }
+
+  bondAuthorized = false;
+  markStateDirty();
+  persistStateNow();
+  Bluefruit.Periph.clearBonds();
+  logEvent("PAIR_REJECTED", "parowanie bez USB; powiazania wyczyszczone");
+
+  BLEConnection *c = Bluefruit.Connection(conn_handle);
+  if (c) c->disconnect();
 }
 
 void setup() {
@@ -1278,17 +1658,19 @@ void setup() {
   powerDownExternalFlash();
 
   lastMillis = millis();
-  fsOk = InternalFS.begin();
+  fsOk = beginInternalFsSafely();
   statePersistError = !fsOk;
-  loadConfig();
+  loadLegacyConfig();
   loadPersistentState();
   lastStateSaveS = uptimeSec();
+  lastModeAccountS = uptimeSec();
+  modeClockStarted = true;
 
   // Po restarcie lub wymianie baterii zatrzask krytyczny wczytany z pamieci
   // dostaje krotkie okno szybkiego migania, zebys go nie przegapil.
   if (frozenLatch || cookedLatch) critFastUntilS = uptimeSec() + CRIT_FAST_REMIND_S;
 
-  probeConfigure();          // 11 bitow rozdzielczosci
+  probeConfigure();          // konfiguracja startowa; doSample powtarza ja przed konwersja
 
   Bluefruit.begin();
   Bluefruit.setTxPower(TX_POWER);
@@ -1296,6 +1678,12 @@ void setup() {
   Bluefruit.autoConnLed(false);          // dioda BLE zjada prad
   Bluefruit.Periph.setConnectCallback(onConnect);
   Bluefruit.Periph.setDisconnectCallback(onDisconnect);
+
+  // Just Works: brak PIN-u, brak sekretu do przechowywania. Uprawnienie daje
+  // fizyczne podlaczenie kabla, sprawdzane w onPairComplete().
+  Bluefruit.Security.setIOCaps(false, false, false);
+  Bluefruit.Security.setMITM(false);
+  Bluefruit.Security.setPairCompleteCallback(onPairComplete);
   bleuart.begin();
 
   Bluefruit.ScanResponse.addName();
