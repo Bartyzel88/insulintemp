@@ -325,7 +325,7 @@ td.t{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
   </div>
 
   <h2>Zdarzenia</h2>
-  <div class="log" id="logBox">
+  <div class="log">
     <div class="empty" id="logEmpty">Naciśnij „Pobierz log”, żeby ściągnąć historię z czujnika.</div>
     <table class="hidden" id="logTable">
       <thead><tr><th>Kiedy</th><th>Zdarzenie</th><th style="text-align:right">°C</th><th>Szczegóły</th></tr></thead>
@@ -643,7 +643,8 @@ function renderLog() {
   }
 
   const tone = { FROZEN:"cold", OVERHEAT:"hot", EXC_START:"amber",
-                 EXC_END:"mute", SENSOR_FAIL:"amber", BATT_LOW:"amber" };
+                 EXC_END:"mute", PROBE_FAIL:"amber", AIR_FAIL:"amber",
+                 PROBE_OK:"mute", AIR_OK:"mute", BATT_LOW:"amber" };
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
@@ -696,7 +697,7 @@ $("btnCalib").onclick = () => {
   if (confirm(`Przyjmuję, że sonda jest teraz dokładnie w 0,00 °C.\n\n` +
               `Odczyt surowy: ${fmtTemp(surowy)} °C\n` +
               `Nowy offset: ${surowy > 0 ? "-" : "+"}${fmtTemp(Math.abs(surowy))} °C`)) {
-    send("C0");
+    send("K");
   }
 };
 
